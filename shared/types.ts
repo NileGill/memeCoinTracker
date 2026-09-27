@@ -73,7 +73,179 @@ export interface TokenView {
   scoreParts: ScoreParts | null;
   flags: TokenFlag[];
   firstSeen: number;
+  /** The trained model's read on this coin; null until a model exists. */
+  ai: AiSignal | null;
 }
+
+// ---- AI model
+
+export interface AiTarget {
+  /** Take profit, % above the entry price. */
+  tp: number;
+  /** Stop loss, % below the entry price. */
+  sl: number;
+  /** Sell after this many minutes if neither was hit. */
+  holdMin: number;
+}
+
+export interface AiSignal {
+  /** How often coins rated like this hit the take-profit before the stop-loss in testing, 0-1. */
+  win: number;
+  /** Average result of those test trades after fees, in % (null when too few to say). */
+  ev: number | null;
+  /** Clears the bar the bot buys at. Only ever true once the model has proven itself. */
+  pick: boolean;
+}
+
+export interface AiDriver {
+  label: string;
+  /** Push on the model's score: positive helps, negative hurts. */
+  impact: number;
+}
+
+export interface StrategyResult {
+  trades: number;
+  winRate: number; // 0-1
+  avgReturn: number; // % per trade after fees
+  totalReturn: number; // sum of per-trade % returns
+  profitFactor: number | null;
+}
+
+export interface MlModelInfo {
+  version: number; // when it was trained (ms epoch)
+  target: AiTarget;
+  /** Rows used to learn / to tune / to test. */
+  trainRows: number;
+  tuneRows: number;
+  testRows: number;
+  tokens: number;
+  dataFrom: number;
+  dataTo: number;
+  /** Test period, which the model never saw while learning. */
+  testFrom: number;
+  testTo: number;
+  /** 0.5 = coin flip, 1 = perfect ranking. */
+  auc: number;
+  /** Share of all test snapshots that hit the target (what random picks would get). */
+  baseRate: number;
+  /** Trades the bot would have taken in the test period. */
+  test: StrategyResult;
+  /** The same test period traded on the plain MemeRadar score, for comparison. */
+  baseline: (StrategyResult & { threshold: number }) | null;
+  proven: boolean;
+  /** Plain-English reasons when not proven. */
+  problems: string[];
+  topFeatures: { label: string; importance: number }[];
+}
+
+export interface MlStatus {
+  state: 'collecting' | 'training' | 'ready' | 'unproven';
+  message: string;
+  /** Finished coin snapshots available to learn from (outcome known). */
+  samples: number;
+  /** Snapshots still waiting for their outcome. */
+  pending: number;
+  /** Snapshots saved in total since recording started, including older ones kept in storage. */
+  stored: number | null;
+  dataFrom: number | null;
+  trainedAt: number | null;
+  nextTrainingAt: number | null;
+  model: MlModelInfo | null;
+}
+
+// ---- Paper trading bot
+
+export interface PaperSettings {
+  /** Share of equity per trade, %. */
+  sizePct: number;
+  maxOpen: number;
+  /** 'auto': use the model once proven, the score until then. 'model': only the proven model. */
+  mode: 'auto' | 'model';
+  scoreMin: number;
+  minLiquidity: number;
+  paused: boolean;
+}
+
+export type PaperStrategy = 'model' | 'score';
+
+export interface PaperPosition {
+  id: string;
+  mint: string;
+  symbol: string;
+  icon: string | null;
+  openedAt: number;
+  /** Market price when bought (TP/SL are measured from this). */
+  entryPrice: number;
+  qty: number;
+  costSol: number;
+  target: AiTarget;
+  closeBy: number;
+  strategy: PaperStrategy;
+  /** Model win chance or MemeRadar score at entry. */
+  signal: number;
+  lastPrice: number;
+  lastPriceAt: number;
+}
+
+export type PaperExit = 'tp' | 'sl' | 'time' | 'manual' | 'gone' | 'reset';
+
+export interface PaperTrade {
+  id: string;
+  mint: string;
+  symbol: string;
+  icon: string | null;
+  openedAt: number;
+  closedAt: number;
+  entryPrice: number;
+  exitPrice: number;
+  costSol: number;
+  proceedsSol: number;
+  pnlSol: number;
+  pnlPct: number;
+  reason: PaperExit;
+  strategy: PaperStrategy;
+  signal: number;
+}
+
+export interface PaperStats {
+  closed: number;
+  wins: number;
+  winRate: number | null;
+  pnlSol: number;
+  pnlPct: number;
+  avgTradePct: number | null;
+  bestPct: number | null;
+  worstPct: number | null;
+  profitFactor: number | null;
+  maxDrawdownPct: number;
+  feesSol: number;
+}
+
+export interface ReadinessCheck {
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface PaperAccountView {
+  createdAt: number;
+  startBalance: number;
+  cash: number;
+  equity: number;
+  settings: PaperSettings;
+  positions: PaperPosition[];
+  trades: PaperTrade[];
+  stats: PaperStats;
+  curve: [number, number][];
+  /** What the bot is doing right now, in plain English. */
+  activity: string;
+  readiness: ReadinessCheck[];
+  updatedAt: number;
+}
+
+export type BotEvent =
+  | { type: 'open'; position: PaperPosition }
+  | { type: 'close'; trade: PaperTrade };
 
 export interface LaunchItem {
   mint: string;
@@ -204,6 +376,7 @@ export interface Snapshot {
   leaderboard: KolEntry[];
   leaderboardUpdated: number | null;
   status: SourceStatus[];
+  ml: MlStatus;
 }
 
 // Jupiter Ultra proxy shapes (subset of the fields the UI uses)
@@ -265,6 +438,8 @@ export interface TokenDetail {
     shieldWarnings: { type: string; message: string; severity: string }[];
   };
   watchedTraderTrades: TraderTrade[];
+  /** Why the model rates this coin the way it does (null without a model). */
+  aiDrivers: AiDriver[] | null;
 }
 
 // ---- Accounts

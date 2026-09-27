@@ -97,7 +97,7 @@ export function Setups() {
         <TokenTable
           tokens={rows}
           presorted
-          columns={['rank', 'token', 'score', 'price', 'm5', 'h1', 'h24', 'vol1h', 'liq', 'mcap', 'age', 'pressure', 'flags', 'spark', 'actions']}
+          columns={['rank', 'token', 'score', 'ai', 'price', 'm5', 'h1', 'h24', 'vol1h', 'liq', 'mcap', 'age', 'pressure', 'flags', 'spark', 'actions']}
           empty={hasSnapshot ? 'Nothing passes these filters right now. Try a lower liquidity minimum.' : 'Loading live market…'}
         />
       </div>

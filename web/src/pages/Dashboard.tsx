@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { AlertList } from '../components/Header';
 import { Icon } from '../components/Icon';
 import { Empty, useTick } from '../components/common';
-import { fmtPrice } from '../lib/format';
+import { fmtPct, fmtPrice, fmtSol } from '../lib/format';
 import { useStore } from '../store';
 import { LaunchRow, MigrationRow, NewsRow, selectSetups, SetupRow, TraderTradeRow } from './shared';
 
@@ -19,12 +19,13 @@ export function Dashboard() {
   const launchesLastHour = useStore((s) => s.launchesLastHour);
   const graduationsLastHour = useStore((s) => s.graduationsLastHour);
   const hasSnapshot = useStore((s) => s.hasSnapshot);
+  const ml = useStore((s) => s.ml);
+  const bot = useStore((s) => s.bot);
 
   const setups = useMemo(() => selectSetups(tokenList, settings), [tokenList, settings]);
   const hot = setups.filter((t) => (t.score ?? 0) >= settings.setupThreshold).length;
   const memeNews = news.filter((n) => n.meme);
   const liveTrades = trades.filter((t) => !t.backfill || Date.now() - t.time < 86_400_000);
-  const activeTraders = traders.filter((t) => t.today.buys + t.today.sells > 0).length;
 
   return (
     <>
@@ -54,13 +55,24 @@ export function Dashboard() {
           <div className="value num">{graduationsLastHour}</div>
           <div className="hint">last hour*</div>
         </div>
-        <div className="kpi">
-          <div className="label">Traders active</div>
-          <div className="value num">
-            {activeTraders}/{traders.length}
-          </div>
-          <div className="hint">traded today</div>
-        </div>
+        <a className="kpi" href="#/bot">
+          <div className="label">AI bot</div>
+          {bot ? (
+            <>
+              <div className={`value num ${bot.stats.pnlSol >= 0 ? 'up' : 'down'}`}>{fmtPct(bot.stats.pnlPct)}</div>
+              <div className="hint">
+                paper balance {fmtSol(bot.equity)} · {bot.positions.length} open
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="value" style={{ fontSize: 15 }}>
+                {ml ? { collecting: 'Learning…', training: 'Training…', ready: 'Proven', unproven: 'Not proven yet' }[ml.state] : '…'}
+              </div>
+              <div className="hint">{ml ? `${ml.samples.toLocaleString()} snapshots learned` : 'model status'}</div>
+            </>
+          )}
+        </a>
       </div>
 
       <div className="grid dash">

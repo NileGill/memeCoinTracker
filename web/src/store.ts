@@ -8,7 +8,9 @@ import type {
   MarketDelta,
   MarketPayload,
   MigrationItem,
+  MlStatus,
   NewsItem,
+  PaperAccountView,
   SourceStatus,
   TokenView,
   TraderTrade,
@@ -31,6 +33,8 @@ export interface Settings {
   alertWatchlist: boolean;
   watchPct: number;
   alertNews: boolean;
+  alertAi: boolean;
+  alertBot: boolean;
   buyPresets: number[];
   maxTradeSol: number;
   setupsMinLiquidity: number;
@@ -53,6 +57,8 @@ export const DEFAULT_SETTINGS: Settings = {
   alertWatchlist: true,
   watchPct: 10,
   alertNews: true,
+  alertAi: true,
+  alertBot: true,
   buyPresets: [0.05, 0.1, 0.25, 0.5, 1],
   maxTradeSol: 2,
   setupsMinLiquidity: 10_000,
@@ -86,7 +92,7 @@ function loadSettings(): Settings {
 }
 
 export type AlertSeverity = 'high' | 'danger' | 'normal' | 'low';
-export type AlertKind = 'setup' | 'pump' | 'dump' | 'volume' | 'trader' | 'convergence' | 'migration' | 'watch' | 'news';
+export type AlertKind = 'setup' | 'pump' | 'dump' | 'volume' | 'trader' | 'convergence' | 'migration' | 'watch' | 'news' | 'ai' | 'bot';
 
 export interface AlertItem {
   id: string;
@@ -154,6 +160,9 @@ export interface AppState {
   swaps: ExecutedSwap[];
   auth: AuthState;
   authModal: null | 'login' | 'signup';
+  ml: MlStatus | null;
+  /** The logged-in user's paper trading bot (undefined = not loaded yet, null = none). */
+  bot: PaperAccountView | null | undefined;
 }
 
 const WATCH_KEY = 'memeradar.watchlist.v1';
@@ -227,6 +236,8 @@ export const useStore = create<AppState>(() => ({
   swaps: loadSwaps(),
   auth: { status: 'loading', user: null },
   authModal: null,
+  ml: null,
+  bot: undefined,
 }));
 
 const set = useStore.setState;

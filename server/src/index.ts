@@ -3,7 +3,9 @@ import path from 'node:path';
 import compression from 'compression';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Holding, HoldingsResponse, Snapshot, TokenDetail } from '../../shared/types';
-import { authRouter, startAuth } from './auth/routes';
+import { authRouter, sessionUserId, startAuth } from './auth/routes';
+import { accountView, getAccount, savePaper, startPaper } from './bot/paper';
+import { botRouter } from './bot/routes';
 import { config, SOL_MINT } from './config';
 import {
   ensureToken,
@@ -26,11 +28,13 @@ import {
   traderViews,
   updateTrader,
 } from './engine/traders';
-import { addClient, broadcast, canAcceptClient, clientCount, send } from './lib/bus';
+import { addClient, broadcast, canAcceptClient, clientCount, send, setClientUser } from './lib/bus';
 import { errMessage } from './lib/http';
 import { allStatus } from './lib/status';
 import { persistAll, restoreAll } from './lib/cache';
 import { restoreState, saveNow, state } from './lib/store';
+import { explain, mlStatus, startModel } from './ml/model';
+import { flushSnapshots, recorderStatus, startRecorder } from './ml/recorder';
 import { jupSearch, jupShield, jupTokens, ultraExecute, ultraHoldings, ultraOrder } from './sources/jupiter';
 import { newsList, onNews, startNews } from './sources/news';
 import { rugcheckSummary } from './sources/rugcheck';
@@ -61,6 +65,7 @@ function snapshot(): Snapshot {
     leaderboard: lb.leaderboard,
     leaderboardUpdated: lb.leaderboardUpdated,
     status: allStatus(),
+    ml: mlStatus(),
   };
 }
 
@@ -126,6 +131,13 @@ app.get('/api/stream', (req, res) => {
   res.write('retry: 3000\n\n');
   send(res, 'snapshot', snapshot());
   addClient(res, ip);
+  // A logged-in visitor also gets live updates from their own paper trading bot.
+  void sessionUserId(req).then((userId) => {
+    if (!userId || res.writableEnded) return;
+    setClientUser(res, userId);
+    const account = getAccount(userId);
+    send(res, 'bot', account ? accountView(account) : null);
+  });
 });
 
 app.get('/api/snapshot', (_req, res) => {
@@ -133,7 +145,18 @@ app.get('/api/snapshot', (_req, res) => {
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, clients: clientCount(), status: allStatus() });
+  const mem = process.memoryUsage();
+  const cpu = process.cpuUsage();
+  const ml = recorderStatus();
+  res.json({
+    ok: true,
+    clients: clientCount(),
+    uptimeS: Math.round(process.uptime()),
+    memoryMb: { rss: Math.round(mem.rss / 1e6), heap: Math.round(mem.heapUsed / 1e6) },
+    cpuS: Math.round((cpu.user + cpu.system) / 1e6),
+    ml: { samples: ml.samples, pending: ml.pending, stored: ml.stored, state: mlStatus().state },
+    status: allStatus(),
+  });
 });
 
 // ---------------------------------------------------------------- tokens
@@ -162,7 +185,12 @@ app.get('/api/token/:mint', async (req, res) => {
     detailCache.set(mint, cached);
     if (detailCache.size > 300) detailCache.delete(detailCache.keys().next().value as string);
   }
-  const detail: TokenDetail = { token: view, security: cached.security, watchedTraderTrades: tradesForMint(mint) };
+  const detail: TokenDetail = {
+    token: view,
+    security: cached.security,
+    watchedTraderTrades: tradesForMint(mint),
+    aiDrivers: explain(view),
+  };
   res.json(detail);
 });
 
@@ -285,6 +313,7 @@ app.post('/api/swap/execute', async (req, res) => {
 // ---------------------------------------------------------------- accounts
 
 app.use('/api', authRouter());
+app.use('/api', botRouter());
 
 app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'Not found' });
@@ -342,7 +371,11 @@ async function boot() {
   startMarket();
   startTraders();
   startNews();
-  void startAuth();
+  startRecorder();
+  void startModel();
+  void startAuth().then((ok) => {
+    if (ok) void startPaper();
+  });
 }
 void boot();
 
@@ -360,7 +393,9 @@ const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
   saveNow();
-  await persistAll(); // warm-restart cache, written once per shutdown
+  // Warm-restart cache, finished model snapshots and paper accounts, all written once per shutdown.
+  const within = (p: Promise<unknown>, ms: number) => Promise.race([p, new Promise((r) => setTimeout(r, ms))]);
+  await Promise.all([persistAll(), within(flushSnapshots(), 12_000), within(savePaper(), 12_000)]);
   server.close();
   process.exit(0);
 };

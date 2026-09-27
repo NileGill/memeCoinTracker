@@ -2183,3 +2183,139 @@ img.ticon.loaded {
     display: none !important;
   }
 }
+
+/* ---------------------------------------------------------------- AI model & paper bot */
+
+.btn.danger {
+  color: var(--red);
+  border-color: rgba(255, 95, 109, 0.35);
+}
+.btn.danger:hover:not(:disabled) {
+  background: var(--red-bg);
+}
+.bot-kpis {
+  margin-bottom: 0;
+}
+.bot-kpis .kpi {
+  background: var(--panel-2);
+}
+.bot-kpis .value {
+  font-size: 18px;
+}
+.bot-model {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 18px;
+  align-items: start;
+}
+.bot-model .bar-row {
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 38px;
+}
+.bot-strategy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+.bot-strategy b {
+  font-size: 12.5px;
+}
+.bot-problems {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--amber);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.bot-settings {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 14px;
+}
+.bot-settings .seg {
+  flex-wrap: wrap;
+}
+.bot-chart {
+  width: 100%;
+  height: 150px;
+  display: block;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.bot-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.bot-checks {
+  display: grid;
+  gap: 6px;
+}
+.bot-check {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--muted);
+}
+.bot-check svg {
+  color: var(--red);
+}
+.bot-check.ok {
+  color: var(--text);
+}
+.bot-check.ok svg {
+  color: var(--green);
+}
+.ai-chip {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.15;
+  background: var(--panel-3);
+  color: var(--muted);
+  cursor: help;
+}
+.ai-chip small {
+  font-size: 10px;
+  font-weight: 600;
+}
+.ai-chip.good {
+  color: var(--text);
+}
+.ai-chip.pick {
+  background: var(--accent-bg);
+  color: var(--accent-2);
+  box-shadow: inset 0 0 0 1px rgba(167, 139, 250, 0.45);
+}
+.ai-drivers .bar-row {
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 44px;
+}
+@media (max-width: 1100px) {
+  .bot-model,
+  .bot-grid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 600px) {
+  .bot-kpis .value {
+    font-size: 16px;
+  }
+  .bot-check {
+    grid-template-columns: 18px minmax(0, 1fr);
+  }
+  .bot-check > .dim {
+    grid-column: 2;
+  }
+}

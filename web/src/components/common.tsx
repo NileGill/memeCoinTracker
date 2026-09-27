@@ -201,3 +201,17 @@ export function useTick(ms = 1000) {
     return () => clearInterval(id);
   }, [ms]);
 }
+
+/** The AI model's rating: how often similar setups hit the profit target first in testing. */
+export function AiChip({ t }: { t: TokenView }) {
+  if (!t.ai) return null;
+  const { win, ev, pick } = t.ai;
+  return (
+    <span
+      className={`ai-chip ${pick ? 'pick' : ev != null && ev > 0 ? 'good' : ''}`}
+      title={`In testing, ${Math.round(win * 100)}% of similar setups hit the profit target before the stop${ev != null ? `; they averaged ${fmtPct(ev)} after fees` : ''}.${pick ? ' The bot would buy this.' : ''}`}
+    >
+      {Math.round(win * 100)}%{ev != null && <small className={pctClass(ev)}>{fmtPct(ev, 1)}</small>}
+    </span>
+  );
+}

@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import type { LaunchItem, MigrationItem, NewsItem, TokenView, TraderTrade } from '../../../shared/types';
 import { Icon } from '../components/Icon';
-import { FlagIcons, Pct, ScoreBadge, TokenCell, TokenIcon } from '../components/common';
+import { AiChip, FlagIcons, Pct, ScoreBadge, TokenCell, TokenIcon } from '../components/common';
 import { fmtAge, fmtAgo, fmtSol, fmtUsd, shortAddr } from '../lib/format';
 import { openToken, useStore, type Settings } from '../store';
 
@@ -48,6 +48,7 @@ export function SetupRow({ t }: { t: TokenView }) {
         </div>
       </div>
       <FlagIcons flags={t.flags} hideEmpty />
+      <AiChip t={t} />
       <button
         className="btn buy xs"
         onClick={(e) => {

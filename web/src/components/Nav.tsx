@@ -5,6 +5,7 @@ import { Icon, type IconName } from './Icon';
 export type Route =
   | 'dashboard'
   | 'setups'
+  | 'bot'
   | 'market'
   | 'launches'
   | 'traders'
@@ -17,6 +18,7 @@ export type Route =
 export const ROUTES: { id: Route; label: string; short: string; icon: IconName }[] = [
   { id: 'dashboard', label: 'Dashboard', short: 'Home', icon: 'dashboard' },
   { id: 'setups', label: 'Best trades', short: 'Best', icon: 'target' },
+  { id: 'bot', label: 'AI bot', short: 'AI bot', icon: 'bot' },
   { id: 'market', label: 'Trending', short: 'Trending', icon: 'fire' },
   { id: 'launches', label: 'New launches', short: 'New', icon: 'rocket' },
   { id: 'traders', label: 'Top traders', short: 'Traders', icon: 'users' },
@@ -29,9 +31,11 @@ export const ROUTES: { id: Route; label: string; short: string; icon: IconName }
 export function Nav({ route }: { route: Route }) {
   const hot = useStore((s) => s.tokenList.filter((t) => (t.score ?? 0) >= s.settings.setupThreshold && !t.flags.some((f) => f.severity === 'danger')).length);
   const watch = useStore((s) => s.watchlist.length);
+  const botOpen = useStore((s) => s.bot?.positions.length ?? 0);
   const badge = (id: Route) => {
     if (id === 'setups' && hot > 0) return <span className="badge green">{hot}</span>;
     if (id === 'watchlist' && watch > 0) return <span className="badge">{watch}</span>;
+    if (id === 'bot' && botOpen > 0) return <span className="badge accent" title="Open paper trades">{botOpen}</span>;
     return null;
   };
   return (
@@ -65,7 +69,7 @@ export function Nav({ route }: { route: Route }) {
 }
 
 /** Phone tab bar: the four most-used pages plus "More" for everything else. */
-const PRIMARY: Route[] = ['dashboard', 'setups', 'launches', 'traders'];
+const PRIMARY: Route[] = ['dashboard', 'setups', 'bot', 'traders'];
 
 function MobileNav({ route, hot }: { route: Route; hot: number }) {
   const [more, setMore] = useState(false);

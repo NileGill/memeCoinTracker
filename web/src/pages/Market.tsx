@@ -55,7 +55,7 @@ export function Market() {
         <TokenTable
           tokens={rows}
           defaultSort={{ col: 'vol1h', desc: true }}
-          columns={['token', 'score', 'price', 'm5', 'h1', 'h6', 'h24', 'vol5m', 'vol1h', 'liq', 'mcap', 'holders', 'age', 'flags', 'spark', 'actions']}
+          columns={['token', 'score', 'ai', 'price', 'm5', 'h1', 'h6', 'h24', 'vol5m', 'vol1h', 'liq', 'mcap', 'holders', 'age', 'flags', 'spark', 'actions']}
           empty={hasSnapshot ? 'No coins in this category right now.' : 'Loading live market…'}
         />
       </div>

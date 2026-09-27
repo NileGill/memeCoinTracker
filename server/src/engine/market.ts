@@ -40,6 +40,8 @@ interface Entry {
   firstSeen: number;
   boostAmount: number | null;
   view: TokenView | null;
+  /** Dropped from the lists but still followed in the background (an open bot trade or model snapshot needs its price). */
+  hidden: boolean;
 }
 
 const MAX_UNIVERSE = 400;
@@ -83,10 +85,11 @@ export function touch(mint: string, source: TokenSource, jup?: JupToken | null) 
   const now = Date.now();
   let e = entries.get(mint);
   if (!e) {
-    e = { mint, jup: null, jupAt: 0, jupRetryAt: 0, ds: null, dsAt: 0, sources: new Map(), firstSeen: now, boostAmount: null, view: null };
+    e = { mint, jup: null, jupAt: 0, jupRetryAt: 0, ds: null, dsAt: 0, sources: new Map(), firstSeen: now, boostAmount: null, view: null, hidden: false };
     entries.set(mint, e);
   }
   e.sources.set(source, now);
+  e.hidden = false;
   if (jup && jup.id === mint) {
     e.jup = jup;
     e.jupAt = now;
@@ -130,24 +133,28 @@ function buildView(e: Entry, now: number): TokenView | null {
   const jTx = (s?: { numBuys?: number; numSells?: number }) =>
     s && (s.numBuys != null || s.numSells != null) ? { buys: s.numBuys ?? 0, sells: s.numSells ?? 0 } : null;
 
+  // DexScreener refreshes fastest, so it wins for live price fields, unless it has stopped
+  // updating this coin while Jupiter hasn't (a stale price would freeze stops and outcomes).
+  const preferJup = !(d && now - e.dsAt < 90_000) && Boolean(j && now - e.jupAt < 90_000);
+  const live = (dsVal: unknown, jupVal: unknown) => (preferJup ? (num(jupVal) ?? num(dsVal)) : (num(dsVal) ?? num(jupVal)));
+
   const created =
     (j?.firstPool?.createdAt ? Date.parse(j.firstPool.createdAt) : NaN) ||
     (j?.createdAt ? Date.parse(j.createdAt) : NaN) ||
     d?.pairCreatedAt ||
     null;
 
-  const base: Omit<TokenView, 'score' | 'scoreParts' | 'flags'> = {
+  const base: Omit<TokenView, 'score' | 'scoreParts' | 'flags' | 'ai'> = {
     mint: e.mint,
     symbol: (j?.symbol ?? d?.baseToken.symbol ?? '???').slice(0, 20),
     name: (j?.name ?? d?.baseToken.name ?? '').slice(0, 60),
     // DexScreener's CDN is much faster than the IPFS gateways many launchpads use.
     icon: d?.info?.imageUrl ?? j?.icon ?? null,
     decimals: j?.decimals ?? null,
-    // DexScreener refreshes every few seconds, so prefer it for live price fields.
-    priceUsd: num(d?.priceUsd) ?? num(j?.usdPrice),
-    mcap: num(d?.marketCap) ?? num(j?.mcap),
-    fdv: num(d?.fdv) ?? num(j?.fdv),
-    liquidity: num(d?.liquidity?.usd) ?? num(j?.liquidity),
+    priceUsd: live(d?.priceUsd, j?.usdPrice),
+    mcap: live(d?.marketCap, j?.mcap),
+    fdv: live(d?.fdv, j?.fdv),
+    liquidity: live(d?.liquidity?.usd, j?.liquidity),
     holders: num(j?.holderCount),
     createdAt: Number.isFinite(created) ? (created as number) : null,
     launchpad: j?.launchpad ?? null,
@@ -191,7 +198,7 @@ function buildView(e: Entry, now: number): TokenView | null {
     firstSeen: e.firstSeen,
   };
   const { score, parts, flags } = scoreToken(base, now);
-  return { ...base, score, scoreParts: parts, flags };
+  return { ...base, score, scoreParts: parts, flags, ai: null };
 }
 
 // ---------------------------------------------------------------- broadcasting
@@ -199,10 +206,25 @@ function buildView(e: Entry, now: number): TokenView | null {
 let lastMarketBroadcast = 0;
 let marketTimer: NodeJS.Timeout | null = null;
 
+/** Adds model predictions to fresh views before they're sent (set by the ML module). */
+let decorate: ((views: TokenView[]) => void) | null = null;
+export function setViewDecorator(fn: (views: TokenView[]) => void) {
+  decorate = fn;
+}
+
 function rebuildAll() {
   const now = Date.now();
   for (const e of entries.values()) e.view = buildView(e, now);
   flagCopycats();
+  if (decorate) {
+    const views: TokenView[] = [];
+    for (const e of entries.values()) if (e.view && !e.hidden) views.push(e.view);
+    try {
+      decorate(views);
+    } catch (err) {
+      console.error('[market] decorator failed:', err);
+    }
+  }
 }
 
 /**
@@ -212,7 +234,7 @@ function rebuildAll() {
 function flagCopycats() {
   const bySymbol = new Map<string, TokenView[]>();
   for (const e of entries.values()) {
-    if (!e.view) continue;
+    if (!e.view || e.hidden) continue;
     const key = e.view.symbol.trim().toLowerCase();
     if (!key || key === '???') continue;
     const group = bySymbol.get(key);
@@ -243,7 +265,7 @@ export function marketPayload(): MarketPayload {
   while (launchTimes.length && launchTimes[0] < hourAgo) launchTimes.shift();
   while (graduationTimes.length && graduationTimes[0] < hourAgo) graduationTimes.shift();
   const tokens: TokenView[] = [];
-  for (const e of entries.values()) if (e.view) tokens.push(e.view);
+  for (const e of entries.values()) if (e.view && !e.hidden) tokens.push(e.view);
   return {
     tokens,
     solPrice,
@@ -369,13 +391,60 @@ async function refreshJupiter() {
 function dropNonMeme() {
   const now = Date.now();
   for (const e of entries.values()) {
-    if (isNonMeme(e.jup) && !isProtected(e, now)) entries.delete(e.mint);
+    if (!e.hidden && isNonMeme(e.jup) && !isProtected(e, now)) retire(e);
   }
+}
+
+// ---------------------------------------------------------------- background follows
+
+type HoldFn = (mint: string) => boolean;
+const strongHolds: HoldFn[] = [];
+const weakHolds: HoldFn[] = [];
+const MAX_HIDDEN = 300;
+
+/**
+ * Keep following a coin's price after it drops off the lists. Without this a coin that
+ * rugged would simply vanish, and an open bot trade or a model snapshot would never see the
+ * loss. Strong holds (open trades) are never dropped; weak ones (model snapshots) may be if
+ * too many pile up.
+ */
+export function registerHold(fn: HoldFn, strong: boolean) {
+  (strong ? strongHolds : weakHolds).push(fn);
+}
+const heldStrong = (mint: string) => strongHolds.some((f) => f(mint));
+const held = (mint: string) => heldStrong(mint) || weakHolds.some((f) => f(mint));
+
+/** Start following a coin's price without listing it (e.g. an open bot trade after a restart). */
+export function followInBackground(mint: string) {
+  if (!mint || entries.has(mint) || NON_MEME_MINTS.has(mint)) return;
+  entries.set(mint, {
+    mint,
+    jup: null,
+    jupAt: 0,
+    jupRetryAt: 0,
+    ds: null,
+    dsAt: 0,
+    sources: new Map(),
+    firstSeen: Date.now(),
+    boostAmount: null,
+    view: null,
+    hidden: true,
+  });
+}
+
+/** Remove a coin from the lists; keep following it quietly if something still needs its price. */
+function retire(e: Entry) {
+  if (held(e.mint)) e.hidden = true;
+  else entries.delete(e.mint);
 }
 
 function prune() {
   const now = Date.now();
   for (const e of entries.values()) {
+    if (e.hidden) {
+      if (!held(e.mint)) entries.delete(e.mint);
+      continue;
+    }
     if (isProtected(e, now)) continue;
     const lastListed = Math.max(...e.sources.values());
     const liq = e.view?.liquidity ?? null;
@@ -383,14 +452,54 @@ function prune() {
     const dead = liq !== null && liq < 2_000 && ageMin > 20;
     const forgotten = now - lastListed > 90 * 60_000 && (e.view?.score ?? 0) < 65;
     const noData = !e.jup && !e.ds && ageMin > 10;
-    if (dead || forgotten || noData) entries.delete(e.mint);
+    if (dead || forgotten || noData) retire(e);
   }
-  if (entries.size > MAX_UNIVERSE) {
-    const ranked = [...entries.values()]
-      .filter((e) => !isProtected(e, now))
-      .sort((a, b) => rank(a) - rank(b));
-    for (const e of ranked.slice(0, entries.size - MAX_UNIVERSE)) entries.delete(e.mint);
+  const visible = [...entries.values()].filter((e) => !e.hidden);
+  if (visible.length > MAX_UNIVERSE) {
+    const ranked = visible.filter((e) => !isProtected(e, now)).sort((a, b) => rank(a) - rank(b));
+    for (const e of ranked.slice(0, visible.length - MAX_UNIVERSE)) retire(e);
   }
+  const hidden = [...entries.values()].filter((e) => e.hidden && !heldStrong(e.mint));
+  if (hidden.length > MAX_HIDDEN) {
+    hidden.sort((a, b) => a.firstSeen - b.firstSeen);
+    for (const e of hidden.slice(0, hidden.length - MAX_HIDDEN)) entries.delete(e.mint);
+  }
+}
+
+export interface EntryInfo {
+  view: TokenView;
+  /** Last time a price source returned data for this coin. */
+  freshAt: number;
+  hidden: boolean;
+}
+
+function info(e: Entry): EntryInfo | null {
+  if (!e.view) return null;
+  return { view: e.view, freshAt: Math.max(e.ds ? e.dsAt : 0, e.jup ? e.jupAt : 0), hidden: e.hidden };
+}
+
+/** A coin's latest view and data freshness, including coins followed in the background. */
+export function entryInfo(mint: string): EntryInfo | null {
+  const e = entries.get(mint);
+  return e ? info(e) : null;
+}
+
+export function allEntries(): EntryInfo[] {
+  const out: EntryInfo[] = [];
+  for (const e of entries.values()) {
+    const i = info(e);
+    if (i) out.push(i);
+  }
+  return out;
+}
+
+/** Launches and graduations in the last hour. */
+export function marketCounts() {
+  const hourAgo = Date.now() - 3_600_000;
+  return {
+    launches1h: launchTimes.filter((t) => t >= hourAgo).length,
+    grads1h: graduationTimes.filter((t) => t >= hourAgo).length,
+  };
 }
 
 /** Lower = evicted first. */
@@ -685,6 +794,7 @@ registerPersisted(
         firstSeen: s.firstSeen ?? Date.now(),
         boostAmount: s.boostAmount ?? null,
         view: null,
+        hidden: false,
       });
     }
     for (const l of saved.launches ?? []) if (l?.mint && !launches.has(l.mint)) launches.set(l.mint, l);

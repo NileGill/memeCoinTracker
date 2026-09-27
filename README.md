@@ -21,6 +21,7 @@ For development with hot reload, run `npm run dev` and open http://localhost:517
 | --- | --- |
 | **Dashboard** | Everything at a glance: best setups, live alerts, fresh launches, top trader moves, graduations and news. |
 | **Best trades** | Coins ranked by a 0-100 score, recalculated every few seconds. Hover a score for its breakdown. |
+| **AI bot** | The AI model's status and test results, its current picks, and your paper trading bot (fake SOL, runs 24/7). |
 | **Trending** | Every tracked coin, filterable by source (trending, most traded, boosted, new pools, graduated, trader buys…) and sortable by any column. |
 | **New launches** | Every new pump.fun coin the moment it's created, plus coins that just graduated to a DEX. |
 | **Top traders** | Today's most profitable memecoin traders (from Kolscan), plus a live feed of the swaps of wallets you watch. The 8 most profitable are pre-loaded; add or remove any wallet. |
@@ -55,6 +56,8 @@ Alerts only fire while the site is open in a browser tab, as requested. Nothing 
 - watchlist moves
 - pump.fun graduations
 - breaking memecoin news
+- AI picks (once the model has proven itself)
+- your paper bot buying or selling
 
 Turn on desktop notifications in Settings to see them while you're in another tab.
 
@@ -69,6 +72,26 @@ Connect Phantom with the button in the top right. Buying and selling uses [Jupit
 - trades with over 15% price impact need an extra confirmation
 
 Memecoins are extremely risky. Most go to zero, and on-chain trades are final.
+
+## AI model and paper trading bot
+
+**What it predicts.** For any coin at any moment: if you bought now, would it hit a profit target (for example +30%) before a stop-loss (for example -15%) within an hour?
+
+**Where the data comes from.** No free source offers the full history of a memecoin's buyers, sellers, liquidity and holders, so the server records its own. Every tracked coin with $5K+ liquidity is snapshotted when it appears and every 15 minutes after: about 55 numbers covering price moves, volume, buy pressure, wallets, holders, liquidity, safety checks, launchpad, how long it has been tracked, and the wider market. Each snapshot's price is then followed for an hour, recording when it first reached +10/20/30/50/100% and -10/15/20/30/50%. Coins that drop off the lists keep being followed in the background, so rugs count as losses instead of vanishing. Finished snapshots are saved to Postgres hourly (kept 14 days) and reloaded after a restart.
+
+**How it learns.** Gradient-boosted decision trees (`server/src/ml/gbdt.ts`, written from scratch so the free server needs nothing extra), trained in short bursts so the site stays responsive. Every 4 hours it retrains on up to 100,000 recent snapshots, split by time:
+
+- the oldest 70% to learn from
+- the next 15% to choose the target (+20/-10, +30/-15 or +50/-20) and how picky to be
+- the newest 15% as a test it never trained on
+
+Test trades pay a 1.25% cost per side, a stop fills at the price actually seen (often worse than the stop), a coin can't be re-bought for an hour after selling, and coins under $10K liquidity or with mint/freeze authority active are never bought. The model is only called **proven**, and only then used by the bot, when test trades averaged +1% or better after fees over at least 25 trades and its ranking skill (AUC) is at least 0.55. Its results are shown next to the plain MemeRadar score traded on the same period.
+
+**Paper trading bot.** Logged-in users can start a bot with fake SOL. It runs on the server around the clock, including while the site is closed: it buys the model's picks once the model is proven (or, until then, coins at your chosen score, if you allow that), sells at the target, the stop or the time limit, and charges every fill a 1% fee, slippage from the coin's liquidity, and a 0.0005 SOL network fee. A coin whose price feed dies counts as a total loss. Settings: trade size, open trades at once, minimum liquidity, strategy, pause.
+
+**Real money** stays locked. The bot page shows a checklist: 100+ paper trades, profitable after fees, profit factor 1.3+, worst drawdown under 35%, 7+ days running, and a proven model. Phantom requires approving every transaction, so fully automatic trading would need a separate wallet made for the bot, holding only money you can afford to lose, with hard per-trade and daily limits. That part isn't built yet.
+
+Local testing: `ML_FAST=1 npm run serve` shrinks every timescale from hours to minutes. Fast-mode data is stored separately and never mixes with real data.
 
 ## Accounts
 
@@ -133,6 +156,10 @@ server/src/
   engine/market.ts  merges all sources into one live token list, launches, graduations
   engine/scoring.ts setup score and risk flags
   engine/traders.ts wallet polling, swap decoding, leaderboard, convergence detection
+  ml/recorder.ts    coin snapshots and their outcomes (the training data)
+  ml/model.ts       training, out-of-sample testing, live predictions
+  ml/gbdt.ts        gradient-boosted decision trees
+  bot/paper.ts      paper trading bots (fake SOL, runs 24/7)
   sources/          one client per data source
 shared/types.ts     types shared by server and web app
 web/src/

@@ -9,6 +9,7 @@ import { initWallet } from './lib/phantom';
 import { startStream } from './lib/stream';
 import { closeToken } from './store';
 import { Account } from './pages/Account';
+import { Bot } from './pages/Bot';
 import { Dashboard } from './pages/Dashboard';
 import { Launches } from './pages/Launches';
 import { Market } from './pages/Market';
@@ -28,6 +29,7 @@ function routeFromHash(): Route {
 const PAGES: Record<Route, ComponentType> = {
   dashboard: Dashboard,
   setups: Setups,
+  bot: Bot,
   market: Market,
   launches: Launches,
   traders: Traders,

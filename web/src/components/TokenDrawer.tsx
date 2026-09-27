@@ -1,11 +1,70 @@
 import { useEffect, useState } from 'react';
-import type { TokenDetail, TokenView } from '../../../shared/types';
+import type { AiDriver, TokenDetail, TokenView } from '../../../shared/types';
 import { api } from '../lib/api';
 import { fmtAge, fmtAgo, fmtNum, fmtPct, fmtPrice, fmtSol, fmtUsd, pctClass, shortAddr } from '../lib/format';
 import { closeToken, useStore } from '../store';
 import { Icon } from './Icon';
 import { CopyButton, ScoreBar, scoreClass, StarButton, TokenIcon, useTick } from './common';
 import { TradePanel } from './TradePanel';
+
+function Driver({ d, max }: { d: AiDriver; max: number }) {
+  const w = (Math.abs(d.impact) / max) * 50;
+  const up = d.impact >= 0;
+  return (
+    <div className="bar-row">
+      <span className="muted truncate">{d.label}</span>
+      <div className="bar-track">
+        <div className="mid" />
+        <div className="bar-fill" style={{ left: up ? '50%' : `${50 - w}%`, width: `${w}%`, background: up ? 'var(--green)' : 'var(--red)' }} />
+      </div>
+      <span className={`num ${up ? 'up' : 'down'}`} style={{ textAlign: 'right' }}>
+        {up ? 'helps' : 'hurts'}
+      </span>
+    </div>
+  );
+}
+
+/** The AI model's rating of this coin and the biggest reasons behind it. */
+function AiPanel({ t, drivers }: { t: TokenView; drivers: AiDriver[] | null | undefined }) {
+  const model = useStore((s) => s.ml?.model);
+  if (!t.ai || !model) return null;
+  const { win, ev, pick } = t.ai;
+  const max = Math.max(...(drivers ?? []).map((d) => Math.abs(d.impact)), 0.001);
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h2>
+          <Icon name="sparkles" size={15} /> AI model
+        </h2>
+        <span className={`badge ${model.proven ? 'green' : 'amber'}`}>{model.proven ? 'proven in testing' : 'not proven yet'}</span>
+      </div>
+      <div className="panel-body col" style={{ gap: 10 }}>
+        <div style={{ fontSize: 13.5 }}>
+          <b>{Math.round(win * 100)}%</b> of similar setups hit <span className="up">+{model.target.tp}%</span> before{' '}
+          <span className="down">−{model.target.sl}%</span> within {model.target.holdMin} minutes in testing
+          {ev != null && (
+            <>
+              , averaging <span className={pctClass(ev)}>{fmtPct(ev)}</span> after fees
+            </>
+          )}
+          . {pick ? <b className="up">The bot would buy this now.</b> : <span className="muted">Not strong enough for the bot to buy.</span>}
+        </div>
+        {drivers && drivers.length > 0 && (
+          <>
+            <div className="dim" style={{ fontSize: 12 }}>
+              Biggest reasons behind this rating
+            </div>
+            <div className="bars ai-drivers">
+              {drivers.map((d) => (
+                <Driver key={d.label} d={d} max={max} />
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function Stat({ k, v, cls }: { k: string; v: string; cls?: string }) {
   return (
@@ -161,6 +220,8 @@ export function TokenDrawer() {
               <Stat k="Holder growth 1h" v={fmtPct(t.holderChange1h)} cls={pctClass(t.holderChange1h)} />
               <Stat k="Organic score" v={t.organicScore != null ? `${t.organicScore.toFixed(0)} (${t.organicLabel})` : '—'} />
             </div>
+
+            <AiPanel t={t} drivers={detail?.aiDrivers} />
 
             {t.scoreParts && (
               <div className="panel">

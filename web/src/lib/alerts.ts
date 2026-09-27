@@ -1,4 +1,4 @@
-import type { NewsItem, ServerEvent, TokenView } from '../../../shared/types';
+import type { BotEvent, NewsItem, ServerEvent, TokenView } from '../../../shared/types';
 import { type AlertItem, type AlertKind, type AlertSeverity, useStore } from '../store';
 import { fmtPct, fmtSol, fmtUsd } from './format';
 
@@ -19,6 +19,8 @@ const WARMUP_MS = 120_000;
  */
 const armed = new Map<string, boolean>();
 const HYSTERESIS = 5;
+/** AI picks re-arm once the model stops picking the coin. */
+const aiArmed = new Map<string, boolean>();
 const seenNews = new Set<string>();
 let newsPrimed = false;
 let newsPrimedAt = 0;
@@ -94,6 +96,22 @@ export function checkMarket(tokens: TokenView[], serverStartedAt: number) {
       }
     }
 
+    // The proven AI model rates this coin a buy.
+    if (!t.ai?.pick) aiArmed.set(t.mint, true);
+    else if (settings.alertAi && aiArmed.get(t.mint) !== false && !onCooldown(`ai:${t.mint}`, 60 * 60_000)) {
+      aiArmed.set(t.mint, false);
+      const target = useStore.getState().ml?.model?.target;
+      push({
+        kind: 'ai',
+        severity: 'high',
+        mint: t.mint,
+        title: `AI pick: ${name}`,
+        body:
+          (target ? `${Math.round(t.ai.win * 100)}% of similar setups hit +${target.tp}% before -${target.sl}% in testing` : 'The model rates this a buy') +
+          (t.ai.ev != null ? ` · avg ${t.ai.ev > 0 ? '+' : ''}${t.ai.ev}% after fees` : ''),
+      });
+    }
+
     // Sharp pump with real liquidity behind it.
     if (
       settings.alertPumps &&
@@ -154,6 +172,7 @@ export function checkMarket(tokens: TokenView[], serverStartedAt: number) {
 function primeToken(t: TokenView, settings: { pumpPct: number; setupThreshold: number; watchPct: number }, watchlist: string[]) {
   known.add(t.mint);
   armed.set(t.mint, t.score == null || t.score < settings.setupThreshold - HYSTERESIS);
+  aiArmed.set(t.mint, !t.ai?.pick);
   const until = Date.now() + 20 * 60_000;
   const m5 = t.change.m5;
   if (m5 != null && m5 >= settings.pumpPct) cooldowns.set(`pump:${t.mint}`, until);
@@ -199,6 +218,31 @@ export function handleServerEvent(ev: ServerEvent) {
       mint: ev.item.mint,
       title: `${ev.item.symbol ? `$${ev.item.symbol}` : 'A token'} graduated from pump.fun`,
       body: ev.item.mcapUsd ? `Market cap ${fmtUsd(ev.item.mcapUsd)}` : 'Now trading on a DEX pool',
+    });
+  }
+}
+
+/** The user's paper trading bot bought or sold something. */
+export function handleBotEvent(ev: BotEvent) {
+  if (!useStore.getState().settings.alertBot) return;
+  if (ev.type === 'open') {
+    const p = ev.position;
+    push({
+      kind: 'bot',
+      severity: 'normal',
+      mint: p.mint,
+      title: `Paper bot bought ${p.symbol}`,
+      body: `${fmtSol(p.costSol)} of fake SOL · target +${p.target.tp}% / stop -${p.target.sl}% · ${p.strategy === 'model' ? 'AI pick' : `score ${p.signal}`}`,
+    });
+  } else {
+    const t = ev.trade;
+    const why = { tp: 'hit its target', sl: 'hit its stop', time: 'time limit reached', manual: 'sold by you', gone: 'price feed died: counted as a total loss', reset: 'account reset' }[t.reason];
+    push({
+      kind: 'bot',
+      severity: t.pnlSol > 0 ? 'high' : 'normal',
+      mint: t.mint,
+      title: `Paper bot sold ${t.symbol}: ${fmtPct(t.pnlPct)}`,
+      body: `${t.pnlSol >= 0 ? '+' : ''}${fmtSol(t.pnlSol)} · ${why}`,
     });
   }
 }
@@ -292,4 +336,6 @@ export const ALERT_ICONS: Record<AlertKind, string> = {
   migration: 'grad',
   watch: 'star',
   news: 'news',
+  ai: 'sparkles',
+  bot: 'bot',
 };

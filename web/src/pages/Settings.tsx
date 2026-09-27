@@ -118,6 +118,8 @@ export function Settings() {
             <NumberSetting k="watchPct" label="Watchlist move size (5 minutes)" min={2} max={200} step={1} suffix="%" />
             <Toggle k="alertMigrations" label="Every pump.fun graduation" hint="Frequent: a new one every few minutes" />
             <Toggle k="alertNews" label="Breaking memecoin news" hint="Silent pop-up, no sound" />
+            <Toggle k="alertAi" label="AI picks" hint="The AI model, once proven, rates a coin a buy" />
+            <Toggle k="alertBot" label="Paper bot trades" hint="Your paper bot buys or sells (while you're logged in)" />
           </div>
         </section>
 

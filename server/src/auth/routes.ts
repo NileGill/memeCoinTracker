@@ -48,9 +48,9 @@ interface UserRow {
   created_at: Date;
 }
 
-type AuthedRequest = Request & { user?: UserRow; sessionHash?: string };
+export type AuthedRequest = Request & { user?: UserRow; sessionHash?: string };
 
-class HttpError extends Error {
+export class HttpError extends Error {
   constructor(
     public status: number,
     message: string,
@@ -94,6 +94,21 @@ async function startSession(req: Request, res: Response, userId: string) {
 
 function clearSessionCookie(req: Request, res: Response) {
   res.append('Set-Cookie', `${COOKIE}=; ${cookieAttrs(req, 0)}`);
+}
+
+/** Called after an account is deleted, so other modules can drop what they keep for it. */
+export const userDeletedListeners: ((userId: string) => Promise<void> | void)[] = [];
+
+/** The logged-in user's id for a request, or null (never throws). */
+export async function sessionUserId(req: Request): Promise<string | null> {
+  if (!authEnabled || !ready) return null;
+  const r = req as AuthedRequest;
+  try {
+    await loadSession(r);
+  } catch {
+    return null;
+  }
+  return r.user?.id ?? null;
 }
 
 /** Attach req.user when the request carries a valid session cookie. */
@@ -256,7 +271,7 @@ function verifyWalletSignature(address: string, message: string, signatureB64: s
 type Handler = (req: AuthedRequest, res: Response) => Promise<unknown>;
 
 /** Wrap a handler: turn HttpErrors into JSON responses and hide internal errors. */
-const route =
+export const route =
   (fn: Handler, opts: { auth?: boolean; limit?: boolean } = {}) =>
   async (req: AuthedRequest, res: Response) => {
     try {
@@ -277,7 +292,7 @@ const route =
   };
 
 /** Block cross-site form posts: state-changing requests must be same-origin JSON. */
-function sameOriginJson(req: Request, res: Response, next: NextFunction) {
+export function sameOriginJson(req: Request, res: Response, next: NextFunction) {
   if (req.method === 'GET' || req.method === 'HEAD') return next();
   const origin = req.get('origin');
   if (origin) {
@@ -525,6 +540,7 @@ export function authRouter() {
         if (!(await verifyPassword(password, user.password_hash))) throw new HttpError(400, 'Password is incorrect.');
         const pool = requireDb();
         await pool.query(`delete from users where id = $1`, [user.id]);
+        for (const fn of userDeletedListeners) await fn(user.id);
         await pool.query(`delete from email_codes where email = $1`, [user.email]);
         clearSessionCookie(req, res);
         return { ok: true };
@@ -596,14 +612,15 @@ export function authRouter() {
   return r;
 }
 
-export async function startAuth() {
+/** Resolves true once accounts are usable (false if they're switched off on this server). */
+export async function startAuth(): Promise<boolean> {
   if (!db) {
     console.log('[auth] no DATABASE_URL: accounts disabled');
-    return;
+    return false;
   }
   if (!emailReady) {
     console.log('[auth] no SMTP settings: accounts disabled until email is configured');
-    return;
+    return false;
   }
   // Retry until the database is reachable (Neon can take a moment to wake up).
   for (let attempt = 1; !ready; attempt++) {
@@ -622,4 +639,5 @@ export async function startAuth() {
     const cutoff = Date.now() - 30 * 60_000;
     for (const [email, at] of noticeSent) if (at < cutoff) noticeSent.delete(email);
   }, 10 * 60_000).unref();
+  return true;
 }

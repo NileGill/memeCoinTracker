@@ -1,8 +1,9 @@
 import type { AccountData, AuthUser, MeResponse } from '../../../shared/types';
 import { adoptAccountData, collectAccountData, myTradersListeners, useStore } from '../store';
+import { restartStream } from './stream';
 
 /** JSON request to the account API. All state-changing calls are same-origin JSON (CSRF-safe). */
-async function call<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
+export async function call<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
     credentials: 'same-origin',
@@ -47,17 +48,22 @@ let syncing = false; // true while applying account data, so it isn't immediatel
 
 /** A successful login / verification / reset: merge this browser's data with the account's. */
 export function signedIn(user: AuthUser, data: AccountData) {
+  const wasGuest = useStore.getState().auth.status === 'guest';
   syncing = true;
   adoptAccountData(data);
   syncing = false;
   useStore.setState({ auth: { status: 'user', user }, authModal: null });
   scheduleSave(0); // upload anything this browser had that the account didn't
+  // Just logged in: reconnect so this tab receives the account's private updates (paper bot).
+  if (wasGuest) restartStream();
 }
 
 export function signedOut() {
+  const wasUser = useStore.getState().auth.status === 'user';
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = null;
-  useStore.setState({ auth: { status: 'guest', user: null } });
+  useStore.setState({ auth: { status: 'guest', user: null }, bot: null });
+  if (wasUser) restartStream();
 }
 
 export function setLinkedWallet(wallet: string | null) {

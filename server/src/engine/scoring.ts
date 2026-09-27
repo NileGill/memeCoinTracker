@@ -3,7 +3,7 @@ import type { ScoreParts, TokenFlag, TokenView } from '../../../shared/types';
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const pct = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(0)}%`;
 
-type Input = Omit<TokenView, 'score' | 'scoreParts' | 'flags'>;
+type Input = Omit<TokenView, 'score' | 'scoreParts' | 'flags' | 'ai'>;
 
 export interface ScoreResult {
   score: number | null;

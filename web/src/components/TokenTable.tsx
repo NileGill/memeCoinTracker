@@ -3,12 +3,13 @@ import type { TokenView } from '../../../shared/types';
 import { fmtAge, fmtNum, fmtPrice, fmtUsd } from '../lib/format';
 import { useCompactLists } from '../lib/useMedia';
 import { openToken, priceMoves } from '../store';
-import { Empty, FlagIcons, Pct, Pressure, ScoreBadge, Sparkline, StarButton, TokenCell, TokenIcon } from './common';
+import { AiChip, Empty, FlagIcons, Pct, Pressure, ScoreBadge, Sparkline, StarButton, TokenCell, TokenIcon } from './common';
 
 export type Col =
   | 'rank'
   | 'token'
   | 'score'
+  | 'ai'
   | 'price'
   | 'm5'
   | 'h1'
@@ -44,6 +45,13 @@ const COLS: Record<Col, ColDef> = {
     sort: (t) => t.score,
     render: (t) => <ScoreBadge t={t} />,
     title: 'Momentum score 0-100 (hover a score for the breakdown)',
+  },
+  ai: {
+    label: 'AI',
+    cls: 'c',
+    sort: (t) => (t.ai ? t.ai.win + (t.ai.pick ? 1 : 0) : null),
+    render: (t) => (t.ai ? <AiChip t={t} /> : <span className="dim">—</span>),
+    title: 'AI model: how often similar setups hit its profit target before its stop in testing (and their average result after fees)',
   },
   price: { label: 'Price', sort: (t) => t.priceUsd, render: (t) => <span className="num">{fmtPrice(t.priceUsd)}</span> },
   m5: { label: '5m', sort: (t) => t.change.m5, render: (t) => <Pct v={t.change.m5} /> },
@@ -120,6 +128,9 @@ export function TokenTable({
   const [sort, setSort] = useState<{ col: Col; desc: boolean } | null>(presorted ? null : (defaultSort ?? null));
   const [shown, setShown] = useState(limit);
   const mobile = useCompactLists();
+  // No AI column until a model has been trained.
+  const hasAi = tokens.some((t) => t.ai);
+  if (!hasAi) columns = columns.filter((c) => c !== 'ai');
 
   const rows = useMemo(() => {
     if (!sort) return tokens;
@@ -156,7 +167,7 @@ export function TokenTable({
               {presorted && <option value="">Best first</option>}
               {sortable.map((c) => (
                 <option key={c} value={`${c}:d`}>
-                  {c === 'age' ? 'Newest' : `${COLS[c].label} (high to low)`}
+                  {c === 'age' ? 'Newest' : c === 'ai' ? 'AI rating (high to low)' : `${COLS[c].label} (high to low)`}
                 </option>
               ))}
               {sortable.includes('m5') && <option value="m5:a">5m (biggest drops)</option>}
@@ -188,6 +199,7 @@ export function TokenTable({
                     <Pct v={t.change.h1} /> <span className="dim">1h</span>
                   </div>
                 </div>
+                {columns.includes('ai') && t.ai && <AiChip t={t} />}
                 {columns.includes('score') && <ScoreBadge t={t} />}
                 <StarButton mint={t.mint} size={18} />
               </div>

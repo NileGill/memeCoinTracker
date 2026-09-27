@@ -1,9 +1,12 @@
 import type {
+  BotEvent,
   KolEntry,
   LaunchItem,
   MarketDelta,
   MigrationItem,
+  MlStatus,
   NewsItem,
+  PaperAccountView,
   ServerEvent,
   Snapshot,
   SourceStatus,
@@ -11,7 +14,7 @@ import type {
   TraderView,
 } from '../../../shared/types';
 import { applyMarket, applyMarketDelta, myTraders, useStore } from '../store';
-import { checkMarket, checkNews, handleServerEvent, resetPriming } from './alerts';
+import { checkMarket, checkNews, handleBotEvent, handleServerEvent, resetPriming } from './alerts';
 import { api } from './api';
 
 /**
@@ -65,6 +68,13 @@ function on<T>(name: string, fn: (data: T) => void) {
   });
 }
 
+/** Reconnect, e.g. after logging in or out, so the server knows who this tab belongs to. */
+export function restartStream() {
+  es?.close();
+  es = null;
+  startStream();
+}
+
 export function startStream() {
   if (es) return;
   es = new EventSource('/api/stream');
@@ -86,6 +96,7 @@ export function startStream() {
       leaderboard: s.leaderboard,
       leaderboardUpdated: s.leaderboardUpdated,
       status: s.status,
+      ml: s.ml ?? null,
     });
     checkMarket(s.market.tokens, s.market.startedAt);
     checkNews(s.news);
@@ -114,6 +125,19 @@ export function startStream() {
     useStore.setState({ leaderboard: l.leaderboard, leaderboardUpdated: l.leaderboardUpdated }),
   );
   on<SourceStatus[]>('status', (status) => useStore.setState({ status }));
+  on<MlStatus>('ml', (ml) => useStore.setState({ ml }));
+  // Private to the logged-in user: their paper trading bot.
+  on<PaperAccountView | null>('bot', (next) => {
+    // Live updates carry the latest 100 trades; keep any older ones already loaded.
+    const prev = useStore.getState().bot;
+    let bot = next;
+    if (next && prev && prev.createdAt === next.createdAt && prev.trades.length > next.trades.length) {
+      const ids = new Set(next.trades.map((t) => t.id));
+      bot = { ...next, trades: [...next.trades, ...prev.trades.filter((t) => !ids.has(t.id))].slice(0, 500) };
+    }
+    useStore.setState({ bot });
+  });
+  on<BotEvent>('botEvent', (ev) => handleBotEvent(ev));
 
   on<ServerEvent>('event', (ev) => {
     if (ev.type === 'traderTrade') {

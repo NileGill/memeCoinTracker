@@ -1,0 +1,475 @@
+import { gunzipSync, gzipSync } from 'node:zlib';
+import { db } from '../auth/db';
+import { allEntries, entryInfo, getSolPrice, marketCounts, registerHold } from '../engine/market';
+import { ML } from './config';
+import { decodeObs, encodeObs, featurize, hasDanger, makeObs, NUM_FEATURES, OBS_FIELDS, type Obs, type ObsContext } from './features';
+
+/*
+ * The model's training data, collected by MemeRadar itself. No free source offers the full
+ * history of a memecoin's buyers, sellers, liquidity and holders, so every tracked coin is
+ * snapshotted when it appears and every 15 minutes after, and each snapshot's price is then
+ * followed for an hour to record what actually happened: which profit and loss levels it hit
+ * first, and when. Coins that rug are followed to the end, so losses aren't quietly dropped.
+ */
+
+const TICK_MS = 5_000;
+const horizonSec = ML.horizonMs / 1000;
+/** Outcome checkpoints, as fractions of the horizon (15, 30 and 60 minutes). */
+const CHECKPOINTS = [0.25, 0.5, 1];
+/** A coin whose price feed stopped for this long, while the feeds work for other coins, is treated as rugged. */
+const GONE_AFTER_MS = 10 * 60_000;
+const GONE_RETURN = -90;
+
+// ---------------------------------------------------------------- live price tape
+
+const TAPE_MS = 12 * 60_000;
+const TAPE_STEP = 15_000;
+const tape = new Map<string, { t: number[]; p: number[] }>();
+const solTape: { t: number; p: number }[] = [];
+let breadth: number | null = null;
+let feedsHealthy = true;
+
+function recordTape(now: number) {
+  const seen = new Set<string>();
+  let fresh = 0;
+  let total = 0;
+  let up = 0;
+  let known = 0;
+  for (const info of allEntries()) {
+    total++;
+    const v = info.view;
+    seen.add(v.mint);
+    if (now - info.freshAt < 120_000) fresh++;
+    if (!info.hidden && v.change.m5 != null) {
+      known++;
+      if (v.change.m5 > 0) up++;
+    }
+    const price = v.priceUsd;
+    if (price == null || !(price > 0) || now - info.freshAt > 90_000) continue;
+    let tp = tape.get(v.mint);
+    if (!tp) tape.set(v.mint, (tp = { t: [], p: [] }));
+    if (!tp.t.length || now - tp.t[tp.t.length - 1] >= TAPE_STEP) {
+      tp.t.push(now);
+      tp.p.push(price);
+    }
+    while (tp.t.length && tp.t[0] < now - TAPE_MS) {
+      tp.t.shift();
+      tp.p.shift();
+    }
+  }
+  for (const mint of tape.keys()) if (!seen.has(mint)) tape.delete(mint);
+  breadth = known >= 20 ? up / known : null;
+  feedsHealthy = total === 0 || fresh / total >= 0.5;
+
+  const sol = getSolPrice();
+  if (sol && (!solTape.length || now - solTape[solTape.length - 1].t >= 60_000)) solTape.push({ t: now, p: sol });
+  while (solTape.length && solTape[0].t < now - 70 * 60_000) solTape.shift();
+}
+
+/** % move from `minutes` ago to the current price, from the tape (null without enough history). */
+function tapeReturn(mint: string, minutes: number): number | null {
+  const tp = tape.get(mint);
+  const now = Date.now();
+  const price = entryInfo(mint)?.view.priceUsd;
+  if (!tp || !tp.t.length || price == null || !(price > 0)) return null;
+  const target = now - minutes * 60_000;
+  if (tp.t[0] > target + TAPE_STEP) return null;
+  let i = 0;
+  while (i + 1 < tp.t.length && tp.t[i + 1] <= target) i++;
+  return (price / tp.p[i] - 1) * 100;
+}
+
+function solChange1h(): number | null {
+  const sol = getSolPrice();
+  if (!sol || !solTape.length || Date.now() - solTape[0].t < 55 * 60_000) return null;
+  return (sol / solTape[0].p - 1) * 100;
+}
+
+/** Everything a snapshot needs besides the coin itself. Shared with live predictions so both see the same inputs. */
+export function obsContext(): ObsContext {
+  const { launches1h, grads1h } = marketCounts();
+  return { now: Date.now(), tapeReturn, sol1h: solChange1h(), launches1h, grads1h, breadth };
+}
+
+// ---------------------------------------------------------------- snapshots and outcomes
+
+export interface Outcome {
+  /** Seconds until the price first reached each ML.tpLevels gain (-1 = never within the horizon). */
+  tp: number[];
+  /** Seconds until it first fell by each ML.slLevels loss (-1 = never). */
+  sl: number[];
+  /** The actual % move seen when each loss level was first crossed (gaps make it worse than the level). */
+  slr: (number | null)[];
+  /** % move at 25%, 50% and 100% of the horizon. */
+  rq: (number | null)[];
+  hi: number;
+  lo: number;
+  /** Seconds of the horizon covered by fresh prices. */
+  last: number;
+  /** 1 = the price feed died (treated as a rug). */
+  gone: number;
+  /** 1 = our own data had a hole (outage): excluded from training. */
+  gap: number;
+}
+
+const OUT_FIELDS = ['tp', 'sl', 'slr', 'rq', 'hi', 'lo', 'last', 'gone', 'gap'] as const;
+
+interface Open {
+  obs: Obs;
+  t0: number;
+  out: Outcome;
+  lastR: number;
+  staleSince: number | null;
+}
+
+const open: Open[] = [];
+const openPerMint = new Map<string, number>();
+const lastSampled = new Map<string, number>();
+const finished: { obs: Obs; out: Outcome }[] = [];
+
+// Keep following coins that have snapshots still waiting for their outcome.
+registerHold((mint) => openPerMint.has(mint), false);
+
+const r2 = (v: number) => Math.round(v * 100) / 100;
+
+function sample(now: number) {
+  const ctx = obsContext();
+  for (const info of allEntries()) {
+    if (info.hidden) continue;
+    const v = info.view;
+    if (!(v.priceUsd! > 0) || (v.liquidity ?? 0) < ML.minLiquidity || now - info.freshAt > 60_000) continue;
+    const last = lastSampled.get(v.mint);
+    if (last !== undefined && now - last < ML.sampleEveryMs) continue;
+    if (open.length >= 20_000) return; // safety valve
+    const obs = makeObs(v, ctx);
+    if (!obs) continue;
+    lastSampled.set(v.mint, now);
+    open.push({
+      obs,
+      t0: now,
+      lastR: 0,
+      staleSince: null,
+      out: {
+        tp: ML.tpLevels.map(() => -1),
+        sl: ML.slLevels.map(() => -1),
+        slr: ML.slLevels.map(() => null),
+        rq: CHECKPOINTS.map(() => null),
+        hi: 0,
+        lo: 0,
+        last: 0,
+        gone: 0,
+        gap: 0,
+      },
+    });
+    openPerMint.set(v.mint, (openPerMint.get(v.mint) ?? 0) + 1);
+  }
+  for (const [mint, t] of lastSampled) if (now - t > ML.sampleEveryMs * 4) lastSampled.delete(mint);
+}
+
+function follow(now: number) {
+  for (let i = open.length - 1; i >= 0; i--) {
+    const o = open[i];
+    const elapsed = now - o.t0;
+    const sec = Math.min(elapsed, ML.horizonMs) / 1000;
+    const info = entryInfo(o.obs.mint);
+    const price = info?.view.priceUsd;
+    let done = elapsed >= ML.horizonMs;
+
+    if (!info) {
+      // Only possible if the coin was dropped despite the hold: we can't know what happened.
+      o.out.gap = 1;
+      done = true;
+    } else if (price != null && price > 0 && now - info.freshAt < 120_000) {
+      o.staleSince = null;
+      const r = (price / o.obs.price - 1) * 100;
+      o.lastR = r;
+      o.out.hi = Math.max(o.out.hi, r);
+      o.out.lo = Math.min(o.out.lo, r);
+      o.out.last = sec;
+      ML.tpLevels.forEach((lvl, k) => {
+        if (o.out.tp[k] < 0 && r >= lvl) o.out.tp[k] = sec;
+      });
+      ML.slLevels.forEach((lvl, k) => {
+        if (o.out.sl[k] < 0 && r <= -lvl) {
+          o.out.sl[k] = sec;
+          o.out.slr[k] = r2(r);
+        }
+      });
+      CHECKPOINTS.forEach((q, k) => {
+        if (o.out.rq[k] == null && elapsed >= q * ML.horizonMs) o.out.rq[k] = r2(r);
+      });
+    } else {
+      o.staleSince ??= now;
+      if (now - o.staleSince >= GONE_AFTER_MS) {
+        if (feedsHealthy) {
+          // Its price feed died while everything else kept updating: count it as a rug.
+          o.out.gone = 1;
+          o.lastR = GONE_RETURN;
+          o.out.lo = Math.min(o.out.lo, GONE_RETURN);
+          ML.slLevels.forEach((_, k) => {
+            if (o.out.sl[k] < 0) {
+              o.out.sl[k] = sec;
+              o.out.slr[k] = GONE_RETURN;
+            }
+          });
+        } else o.out.gap = 1;
+        done = true;
+      }
+    }
+
+    if (!done) continue;
+    if (!o.out.gone && !o.out.gap && o.out.last < horizonSec * 0.9) o.out.gap = 1; // prices went missing near the end
+    o.out.rq = o.out.rq.map((v) => v ?? r2(o.lastR));
+    o.out.hi = r2(o.out.hi);
+    o.out.lo = r2(o.out.lo);
+    open.splice(i, 1);
+    const left = (openPerMint.get(o.obs.mint) ?? 1) - 1;
+    if (left <= 0) openPerMint.delete(o.obs.mint);
+    else openPerMint.set(o.obs.mint, left);
+    finished.push({ obs: o.obs, out: o.out });
+    addRow(o.obs, o.out);
+  }
+}
+
+// ---------------------------------------------------------------- in-memory training set
+
+/** Values stored per row for outcomes: tp, sl, slr, rq, hi, lo, last, gone, gap. */
+const NT = ML.tpLevels.length;
+const NS = ML.slLevels.length;
+const NQ = CHECKPOINTS.length;
+export const OUT_W = NT + NS + NS + NQ + 5;
+export const OUT_AT = { tp: 0, sl: NT, slr: NT + NS, rq: NT + 2 * NS, hi: NT + 2 * NS + NQ, lo: NT + 2 * NS + NQ + 1, last: NT + 2 * NS + NQ + 2, gone: NT + 2 * NS + NQ + 3, gap: NT + 2 * NS + NQ + 4 };
+
+const F = NUM_FEATURES;
+const CAP = Math.ceil(ML.maxRows * 1.1);
+
+export interface Dataset {
+  n: number;
+  F: number;
+  t: Float64Array;
+  mint: Int32Array;
+  X: Float32Array;
+  out: Float32Array;
+  liq: Float32Array;
+  danger: Uint8Array;
+  score: Float32Array;
+}
+
+const data: Dataset = {
+  n: 0,
+  F,
+  t: new Float64Array(CAP),
+  mint: new Int32Array(CAP),
+  X: new Float32Array(CAP * F),
+  out: new Float32Array(CAP * OUT_W),
+  liq: new Float32Array(CAP),
+  danger: new Uint8Array(CAP),
+  score: new Float32Array(CAP),
+};
+const mintIds = new Map<string, number>();
+/** While the data is being loaded or a model is training, new rows wait here. */
+let busy = 0;
+const waiting: { obs: Obs; out: Outcome }[] = [];
+
+function writeRow(obs: Obs, out: Outcome) {
+  if (data.n >= CAP) {
+    // Drop the oldest 10% (rows are appended in time order).
+    const drop = Math.ceil(ML.maxRows * 0.1);
+    const keep = data.n - drop;
+    data.t.copyWithin(0, drop, data.n);
+    data.mint.copyWithin(0, drop, data.n);
+    data.X.copyWithin(0, drop * F, data.n * F);
+    data.out.copyWithin(0, drop * OUT_W, data.n * OUT_W);
+    data.liq.copyWithin(0, drop, data.n);
+    data.danger.copyWithin(0, drop, data.n);
+    data.score.copyWithin(0, drop, data.n);
+    data.n = keep;
+  }
+  const i = data.n++;
+  data.t[i] = obs.t;
+  let id = mintIds.get(obs.mint);
+  if (id === undefined) mintIds.set(obs.mint, (id = mintIds.size));
+  data.mint[i] = id;
+  featurize(obs, data.X, i * F);
+  const o = i * OUT_W;
+  out.tp.forEach((v, k) => (data.out[o + OUT_AT.tp + k] = v));
+  out.sl.forEach((v, k) => (data.out[o + OUT_AT.sl + k] = v));
+  out.slr.forEach((v, k) => (data.out[o + OUT_AT.slr + k] = v ?? NaN));
+  out.rq.forEach((v, k) => (data.out[o + OUT_AT.rq + k] = v ?? NaN));
+  data.out[o + OUT_AT.hi] = out.hi;
+  data.out[o + OUT_AT.lo] = out.lo;
+  data.out[o + OUT_AT.last] = out.last;
+  data.out[o + OUT_AT.gone] = out.gone;
+  data.out[o + OUT_AT.gap] = out.gap;
+  data.liq[i] = obs.liq ?? NaN;
+  data.danger[i] = hasDanger(obs) ? 1 : 0;
+  data.score[i] = obs.score ?? NaN;
+}
+
+function addRow(obs: Obs, out: Outcome) {
+  if (busy > 0) waiting.push({ obs, out });
+  else writeRow(obs, out);
+}
+
+/**
+ * Exclusive use of the training data (no rows are added or moved until `release` is called).
+ * Rows are in rough time order; `t` holds each snapshot's time.
+ */
+export function borrowDataset(): { data: Dataset; release: () => void } {
+  busy++;
+  let released = false;
+  return {
+    data,
+    release: () => {
+      if (released) return;
+      released = true;
+      busy--;
+      if (busy === 0) for (const w of waiting.splice(0)) writeRow(w.obs, w.out);
+    },
+  };
+}
+
+// ---------------------------------------------------------------- database
+
+let tableReady = false;
+let loaded = false;
+let stored: number | null = null;
+let lastRetention = 0;
+
+async function ensureTable() {
+  if (!db || tableReady) return;
+  await db.query(`
+    create table if not exists ml_batches (
+      id bigserial primary key,
+      created_at timestamptz not null default now(),
+      schema int not null,
+      n int not null,
+      t_min bigint not null,
+      t_max bigint not null,
+      data bytea not null
+    );
+    create index if not exists ml_batches_schema_created_idx on ml_batches (schema, created_at);
+  `);
+  tableReady = true;
+}
+
+/** Load recent stored snapshots into memory (newest first until the cap, then applied oldest first). */
+async function loadHistory() {
+  if (!db) return;
+  busy++;
+  const started = Date.now();
+  try {
+    await ensureTable();
+    const { rows: meta } = await db.query<{ id: string; n: number }>(
+      `select id, n from ml_batches where schema = $1 and created_at > now() - make_interval(days => $2) order by id desc`,
+      [ML.schema, ML.loadDays],
+    );
+    const pick: string[] = [];
+    let total = 0;
+    for (const m of meta) {
+      if (total >= ML.maxRows) break;
+      pick.push(m.id);
+      total += m.n;
+    }
+    pick.reverse();
+    let rowsLoaded = 0;
+    for (let i = 0; i < pick.length; i += 6) {
+      const { rows } = await db.query<{ data: Buffer }>(`select data from ml_batches where id = any($1::bigint[]) order by id`, [
+        pick.slice(i, i + 6),
+      ]);
+      for (const r of rows) {
+        const batch = JSON.parse(gunzipSync(r.data).toString('utf8')) as { fields: string[]; out: string[]; rows: unknown[][] };
+        const nf = batch.fields.length;
+        for (const row of batch.rows) {
+          const obs = decodeObs(batch.fields, row.slice(0, nf));
+          const outVals: Record<string, unknown> = {};
+          batch.out.forEach((k, j) => (outVals[k] = row[nf + j]));
+          const out = outVals as unknown as Outcome;
+          if (!Array.isArray(out.tp) || !Array.isArray(out.sl) || typeof obs.t !== 'number' || !(obs.price > 0)) continue;
+          writeRow(obs, out);
+          rowsLoaded++;
+        }
+        await new Promise((res) => setTimeout(res, 10)); // stay responsive while loading
+      }
+    }
+    await refreshStoredCount();
+    console.log(`[ml] loaded ${rowsLoaded} stored snapshots in ${Date.now() - started}ms`);
+  } catch (e) {
+    console.error('[ml] loading stored snapshots failed:', e instanceof Error ? e.message : e);
+  } finally {
+    loaded = true;
+    busy--;
+    if (busy === 0) for (const w of waiting.splice(0)) writeRow(w.obs, w.out);
+  }
+}
+
+async function refreshStoredCount() {
+  if (!db) return;
+  const { rows } = await db.query<{ total: string | null }>(`select sum(n) as total from ml_batches where schema = $1`, [ML.schema]);
+  stored = Number(rows[0]?.total ?? 0);
+}
+
+/** Write finished snapshots to the database (hourly and at shutdown). */
+export async function flushSnapshots() {
+  if (!finished.length) return;
+  if (!db) {
+    finished.length = 0; // nowhere to keep them; they're still in memory for training
+    return;
+  }
+  const batch = finished.splice(0, finished.length);
+  try {
+    await ensureTable();
+    const rows = batch.map(({ obs, out }) => [...encodeObs(obs), ...OUT_FIELDS.map((k) => out[k])]);
+    const data = gzipSync(JSON.stringify({ fields: OBS_FIELDS, out: OUT_FIELDS, rows }));
+    const tMin = batch.reduce((m, b) => Math.min(m, b.obs.t), Infinity);
+    const tMax = batch.reduce((m, b) => Math.max(m, b.obs.t), 0);
+    await db.query(`insert into ml_batches (schema, n, t_min, t_max, data) values ($1, $2, $3, $4, $5)`, [
+      ML.schema,
+      batch.length,
+      tMin,
+      tMax,
+      data,
+    ]);
+    stored = (stored ?? 0) + batch.length;
+    if (Date.now() - lastRetention > 24 * 3_600_000) {
+      lastRetention = Date.now();
+      await db.query(`delete from ml_batches where created_at < now() - make_interval(days => $1)`, [ML.retentionDays]);
+      await refreshStoredCount();
+    }
+  } catch (e) {
+    // Keep them for the next attempt (bounded, in case the database is gone for a long time).
+    finished.unshift(...batch.slice(-20_000));
+    console.error('[ml] saving snapshots failed:', e instanceof Error ? e.message : e);
+  }
+}
+
+// ---------------------------------------------------------------- status & start
+
+export function recorderStatus() {
+  let from: number | null = null;
+  for (let i = 0; i < data.n; i++) if (from === null || data.t[i] < from) from = data.t[i];
+  return { samples: data.n + waiting.length, pending: open.length, stored, dataFrom: from, loaded };
+}
+
+let started = false;
+export function startRecorder() {
+  if (started) return;
+  started = true;
+  setInterval(() => {
+    const now = Date.now();
+    try {
+      recordTape(now);
+      follow(now);
+      sample(now);
+    } catch (e) {
+      console.error('[ml] recorder tick failed:', e);
+    }
+  }, TICK_MS).unref();
+  // Load stored history in the background, then start the hourly saves.
+  void loadHistory().then(() => {
+    setInterval(() => void flushSnapshots(), ML.flushEveryMs).unref();
+  });
+}
+
+/** False while most price feeds are down (an outage, not a rug). */
+export const feedsOk = () => feedsHealthy;

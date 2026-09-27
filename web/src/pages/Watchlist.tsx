@@ -21,7 +21,7 @@ export function Watchlist() {
         <TokenTable
           tokens={rows}
           defaultSort={{ col: 'm5', desc: true }}
-          columns={['token', 'score', 'price', 'm5', 'h1', 'h6', 'h24', 'vol1h', 'liq', 'mcap', 'holders', 'flags', 'spark', 'actions']}
+          columns={['token', 'score', 'ai', 'price', 'm5', 'h1', 'h6', 'h24', 'vol1h', 'liq', 'mcap', 'holders', 'flags', 'spark', 'actions']}
           empty={watchlist.length ? 'Loading your coins…' : 'Star any coin (☆) to add it here.'}
         />
         {loading > 0 && rows.length > 0 && (
