@@ -1,0 +1,20 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# New > Blueprint > pick this repo. Every push to main redeploys automatically.
+services:
+  - type: web
+    name: memeradar
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm run serve
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: HOST
+        value: 0.0.0.0
+      # Optional, add in the Render dashboard (Environment tab) if you want them:
+      #   SOLANA_RPC_URL   a private RPC such as Helius (faster, more reliable trader tracking)
+      #   JUPITER_API_KEY  from https://portal.jup.ag (higher Jupiter rate limits)

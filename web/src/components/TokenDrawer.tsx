@@ -115,7 +115,7 @@ export function TokenDrawer() {
               <CopyButton text={t.mint} label="Copy address" />
               <span className="spacer" />
               {t.sources
-                .filter((s) => s !== 'search')
+                .filter((s) => s !== 'search' && s !== 'watch')
                 .map((s) => (
                   <span key={s} className="badge">
                     {SOURCE_LABEL[s] ?? s}

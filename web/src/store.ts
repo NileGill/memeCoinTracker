@@ -3,6 +3,7 @@ import type {
   HoldingsResponse,
   KolEntry,
   LaunchItem,
+  MarketDelta,
   MarketPayload,
   MigrationItem,
   NewsItem,
@@ -136,6 +137,37 @@ export interface AppState {
   swaps: ExecutedSwap[];
 }
 
+const WATCH_KEY = 'memeradar.watchlist.v1';
+const MY_TRADERS_KEY = 'memeradar.mytraders.v1';
+const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+function loadJson<T>(key: string, valid: (v: unknown) => v is T, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    const v: unknown = raw ? JSON.parse(raw) : null;
+    return valid(v) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveJson(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* storage unavailable: lasts for this session only */
+  }
+}
+
+const isMintList = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string' && BASE58.test(x));
+
+export interface MyTrader {
+  address: string;
+  label: string;
+}
+const isMyTraders = (v: unknown): v is MyTrader[] =>
+  Array.isArray(v) && v.every((x) => x && typeof x.address === 'string' && BASE58.test(x.address) && typeof x.label === 'string');
+
 const SWAPS_KEY = 'memeradar.swaps.v1';
 function loadSwaps(): ExecutedSwap[] {
   try {
@@ -164,7 +196,7 @@ export const useStore = create<AppState>(() => ({
   traderTrades: [],
   leaderboard: [],
   leaderboardUpdated: null,
-  watchlist: [],
+  watchlist: loadJson(WATCH_KEY, isMintList, []).slice(0, 100),
   status: [],
   alerts: [],
   unread: 0,
@@ -187,21 +219,25 @@ export const priceHistory = new Map<string, number[]>();
 /** Latest price direction per token, used to flash table rows green or red. */
 export const priceMoves = new Map<string, { dir: 'up' | 'down'; seq: number; at: number }>();
 
+function recordPrice(t: TokenView) {
+  if (t.priceUsd == null) return;
+  const h = priceHistory.get(t.mint) ?? [];
+  const last = h[h.length - 1];
+  if (last !== undefined && last !== t.priceUsd) {
+    const prev = priceMoves.get(t.mint);
+    priceMoves.set(t.mint, { dir: t.priceUsd > last ? 'up' : 'down', seq: (prev?.seq ?? 0) + 1, at: Date.now() });
+  }
+  if (last !== t.priceUsd) h.push(t.priceUsd);
+  if (h.length > 100) h.splice(0, h.length - 100);
+  priceHistory.set(t.mint, h);
+}
+
+/** Full market state (sent on connect). */
 export function applyMarket(m: MarketPayload) {
   const tokens: Record<string, TokenView> = {};
   for (const t of m.tokens) {
     tokens[t.mint] = t;
-    if (t.priceUsd != null) {
-      const h = priceHistory.get(t.mint) ?? [];
-      const last = h[h.length - 1];
-      if (last !== undefined && last !== t.priceUsd) {
-        const prev = priceMoves.get(t.mint);
-        priceMoves.set(t.mint, { dir: t.priceUsd > last ? 'up' : 'down', seq: (prev?.seq ?? 0) + 1, at: Date.now() });
-      }
-      if (h[h.length - 1] !== t.priceUsd) h.push(t.priceUsd);
-      if (h.length > 100) h.splice(0, h.length - 100);
-      priceHistory.set(t.mint, h);
-    }
+    recordPrice(t);
   }
   for (const mint of priceHistory.keys()) {
     if (!tokens[mint]) {
@@ -217,6 +253,55 @@ export function applyMarket(m: MarketPayload) {
     graduationsLastHour: m.graduationsLastHour,
     marketTime: m.time,
   });
+}
+
+/** Incremental update: only tokens that changed, plus removals. Returns the merged list. */
+export function applyMarketDelta(d: MarketDelta): TokenView[] {
+  const tokens = { ...get().tokens };
+  for (const t of d.tokens) {
+    tokens[t.mint] = t;
+    recordPrice(t);
+  }
+  for (const mint of d.removed) {
+    delete tokens[mint];
+    priceHistory.delete(mint);
+    priceMoves.delete(mint);
+  }
+  const tokenList = Object.values(tokens);
+  set({
+    tokens,
+    tokenList,
+    solPrice: d.solPrice ?? get().solPrice,
+    launchesLastHour: d.launchesLastHour,
+    graduationsLastHour: d.graduationsLastHour,
+    marketTime: d.time,
+  });
+  return tokenList;
+}
+
+// ------------------------------------------------------------------ watchlist (kept in this browser)
+
+export function toggleWatch(mint: string) {
+  const cur = get().watchlist;
+  const watchlist = cur.includes(mint) ? cur.filter((m) => m !== mint) : [...cur, mint].slice(-100);
+  set({ watchlist });
+  saveJson(WATCH_KEY, watchlist);
+  return watchlist;
+}
+
+// ------------------------------------------------------------------ trader wallets this browser added
+
+export function myTraders(): MyTrader[] {
+  return loadJson(MY_TRADERS_KEY, isMyTraders, []);
+}
+
+export function rememberTrader(address: string, label: string) {
+  const list = myTraders().filter((t) => t.address !== address);
+  saveJson(MY_TRADERS_KEY, [...list, { address, label }].slice(-40));
+}
+
+export function forgetTrader(address: string) {
+  saveJson(MY_TRADERS_KEY, myTraders().filter((t) => t.address !== address));
 }
 
 // ------------------------------------------------------------------ actions

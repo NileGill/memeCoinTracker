@@ -78,7 +78,24 @@ Copy `.env.example` to `.env` to change:
 - `JUPITER_API_KEY`: a free key from [portal.jup.ag](https://portal.jup.ag) for higher Jupiter rate limits.
 - `PORT` / `HOST`: the server listens on `127.0.0.1:3000` by default, so it's only reachable from your computer.
 
-Your watchlist and watched traders are saved in `data/state.json`.
+Your watchlist is saved in your browser, so every visitor has their own. The shared list of watched traders is saved in `data/state.json`. Wallets you add yourself are also remembered in your browser and restored automatically if the server restarts.
+
+## Hosting it online (free)
+
+The repo includes a [Render](https://render.com) Blueprint (`render.yaml`), so the site runs on Render's free plan and redeploys automatically on every push to `main`.
+
+1. Sign in at [render.com](https://render.com) with GitHub.
+2. Click **New → Blueprint**, pick the `memeCoinTracker` repo, then **Apply**.
+3. After the first build (~3 minutes) the site is live at `https://memeradar.onrender.com` (or a similar name Render assigns).
+
+Good to know about the free plan:
+
+- **It sleeps after 15 minutes with no visitors.** The first visit after that takes about a minute to wake it, and then another minute to fill with live data. An open tab keeps it awake.
+- **Restarts reset the server's memory.** That happens on every deploy and after sleeping: the launch feed and trader history start over, and the trader list goes back to today's top 8 plus any wallets your browser added.
+- **Its IP is shared with other Render apps**, so free APIs may rate-limit it sooner. Adding `SOLANA_RPC_URL` (free Helius key) and `JUPITER_API_KEY` under the service's **Environment** tab fixes most of that.
+- **On a phone**, tap **Open in Phantom** to use the site inside the Phantom app's browser so you can trade.
+
+The site is public and has no login. Anyone with the link can view it and change the shared trader list. Trades always need the visitor's own Phantom approval.
 
 ## Data sources
 

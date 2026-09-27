@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TokenView, UltraOrder } from '../../../shared/types';
 import { api, SOL_MINT } from '../lib/api';
 import { fmtNum, fmtSol, fmtUsd, fromBaseUnits, toBaseUnits } from '../lib/format';
-import { connectWallet, getPhantom, PHANTOM_DOWNLOAD, refreshHoldings, signAndExecute } from '../lib/phantom';
+import { connectWallet, getPhantom, PHANTOM_DOWNLOAD, phantomAppLink, refreshHoldings, signAndExecute } from '../lib/phantom';
 import { recordSwap, useStore } from '../store';
 import { Icon } from './Icon';
 
@@ -293,9 +293,15 @@ export function TradePanel({ token, initialSide }: { token: TokenView; initialSi
       )}
 
       {phantomMissing ? (
-        <a className="btn primary lg wide" href={PHANTOM_DOWNLOAD} target="_blank" rel="noreferrer">
-          Install Phantom to trade
-        </a>
+        phantomAppLink() ? (
+          <a className="btn primary lg wide" href={phantomAppLink()!}>
+            Open in the Phantom app to trade
+          </a>
+        ) : (
+          <a className="btn primary lg wide" href={PHANTOM_DOWNLOAD} target="_blank" rel="noreferrer">
+            Install Phantom to trade
+          </a>
+        )
       ) : (
         <button
           className={`btn lg wide ${side === 'buy' ? 'buy' : 'sell'}`}

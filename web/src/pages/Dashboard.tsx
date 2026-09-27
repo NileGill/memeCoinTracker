@@ -167,7 +167,7 @@ export function Dashboard() {
         </section>
       </div>
       <p className="dim" style={{ fontSize: 11.5, marginTop: 12 }}>
-        * Counted since the server started.
+        * Counted since the server last started (it restarts when a new version is deployed).
       </p>
     </>
   );

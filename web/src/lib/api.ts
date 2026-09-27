@@ -32,8 +32,8 @@ export interface SearchResult {
 export const api = {
   token: (mint: string) => request<TokenDetail>(`/api/token/${mint}`),
   search: (q: string) => request<SearchResult[]>(`/api/search?q=${encodeURIComponent(q)}`),
-  watch: (mint: string) => request(`/api/watchlist`, { method: 'POST', body: JSON.stringify({ mint }) }),
-  unwatch: (mint: string) => request(`/api/watchlist/${mint}`, { method: 'DELETE' }),
+  /** Tell the server which coins this browser watches so it keeps tracking them. */
+  watching: (mints: string[]) => request(`/api/watching`, { method: 'POST', body: JSON.stringify({ mints }) }),
   addTrader: (address: string, label: string, source: 'manual' | 'kolscan' = 'manual') =>
     request(`/api/traders`, { method: 'POST', body: JSON.stringify({ address, label, source }) }),
   updateTrader: (address: string, patch: { label?: string; alerts?: boolean }) =>

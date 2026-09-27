@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import type { TokenFlag, TokenView } from '../../../shared/types';
 import { api } from '../lib/api';
 import { fmtPct, hashColor, pctClass } from '../lib/format';
-import { priceHistory, useStore } from '../store';
+import { priceHistory, toggleWatch, useStore } from '../store';
 import { Icon } from './Icon';
 
 /** Shows initials immediately and fades the real image in once it loads (many icons live on slow IPFS gateways). */
@@ -151,25 +151,14 @@ export function Sparkline({ mint, width = 72, height = 24 }: { mint: string; wid
 
 export function StarButton({ mint, size = 16 }: { mint: string; size?: number }) {
   const on = useStore((s) => s.watchlist.includes(mint));
-  const [busy, setBusy] = useState(false);
   return (
     <button
       className={`star ${on ? 'on' : ''}`}
-      title={on ? 'Remove from watchlist' : 'Add to watchlist'}
-      disabled={busy}
-      onClick={async (e) => {
+      title={on ? 'Remove from watchlist' : 'Add to watchlist (saved in this browser)'}
+      onClick={(e) => {
         e.stopPropagation();
-        setBusy(true);
-        const next = on ? useStore.getState().watchlist.filter((m) => m !== mint) : [...useStore.getState().watchlist, mint];
-        useStore.setState({ watchlist: next });
-        try {
-          if (on) await api.unwatch(mint);
-          else await api.watch(mint);
-        } catch {
-          useStore.setState({ watchlist: on ? [...next, mint] : next.filter((m) => m !== mint) });
-        } finally {
-          setBusy(false);
-        }
+        const next = toggleWatch(mint);
+        if (!on) api.watching(next).catch(() => undefined);
       }}
     >
       <Icon name="star" size={size} className={on ? 'filled-star' : ''} />

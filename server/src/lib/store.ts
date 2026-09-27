@@ -10,15 +10,9 @@ export interface StoredTrader {
   alerts: boolean;
 }
 
-export interface StoredWatch {
-  mint: string;
-  addedAt: number;
-}
-
 interface State {
   version: 1;
   traders: StoredTrader[];
-  watchlist: StoredWatch[];
   /** True once the trader list has been created, so an emptied list is not re-seeded. */
   tradersInitialised: boolean;
 }
@@ -26,14 +20,13 @@ interface State {
 const FILE = path.join(config.dataDir, 'state.json');
 
 function load(): State {
-  const empty: State = { version: 1, traders: [], watchlist: [], tradersInitialised: false };
+  const empty: State = { version: 1, traders: [], tradersInitialised: false };
   if (!existsSync(FILE)) return empty;
   try {
     const raw = JSON.parse(readFileSync(FILE, 'utf8')) as Partial<State>;
     return {
       version: 1,
       traders: Array.isArray(raw.traders) ? raw.traders : [],
-      watchlist: Array.isArray(raw.watchlist) ? raw.watchlist : [],
       tradersInitialised: Boolean(raw.tradersInitialised),
     };
   } catch (e) {

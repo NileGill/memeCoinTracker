@@ -1,5 +1,6 @@
 import type {
   LaunchItem,
+  MarketDelta,
   MarketPayload,
   MigrationItem,
   TokenSource,
@@ -9,7 +10,6 @@ import { NON_MEME_MINTS, NON_MEME_TAGS, SOL_MINT } from '../config';
 import { broadcast } from '../lib/bus';
 import { num } from '../lib/http';
 import { markError, markOk, registerSource } from '../lib/status';
-import { state } from '../lib/store';
 import {
   dsLatestBoosts,
   dsLatestProfiles,
@@ -64,8 +64,12 @@ function isNonMeme(j: JupToken | null): boolean {
   return tags.some((t) => NON_MEME_TAGS.has(t));
 }
 
+/** Watchlists live in each visitor's browser; open tabs re-announce them every few minutes. */
+const WATCH_TTL = 15 * 60_000;
+
 function isProtected(e: Entry, now: number) {
-  if (state.watchlist.some((w) => w.mint === e.mint)) return true;
+  const watched = e.sources.get('watch');
+  if (watched && now - watched < WATCH_TTL) return true;
   const trader = e.sources.get('trader');
   if (trader && now - trader < 6 * 3_600_000) return true;
   const search = e.sources.get('search');
@@ -184,9 +188,7 @@ function buildView(e: Entry, now: number): TokenView | null {
     },
     sources: [...e.sources.keys()],
     firstSeen: e.firstSeen,
-    updatedAt: Math.max(e.jupAt, e.dsAt),
   };
-  if (state.watchlist.some((w) => w.mint === e.mint) && !base.sources.includes('watch')) base.sources.push('watch');
   const { score, parts, flags } = scoreToken(base, now);
   return { ...base, score, scoreParts: parts, flags };
 }
@@ -251,7 +253,33 @@ export function marketPayload(): MarketPayload {
   };
 }
 
-/** Rebuild views and push them to browsers, at most once every 2.5s. */
+/** What each token looked like in the last broadcast, to send only what changed. */
+const lastSent = new Map<string, string>();
+
+function marketDelta(): MarketDelta {
+  const full = marketPayload();
+  const changed: TokenView[] = [];
+  const present = new Set<string>();
+  for (const t of full.tokens) {
+    present.add(t.mint);
+    const json = JSON.stringify(t);
+    if (lastSent.get(t.mint) !== json) {
+      lastSent.set(t.mint, json);
+      changed.push(t);
+    }
+  }
+  const removed: string[] = [];
+  for (const mint of lastSent.keys()) {
+    if (!present.has(mint)) {
+      lastSent.delete(mint);
+      removed.push(mint);
+    }
+  }
+  const { tokens: _all, ...rest } = full;
+  return { ...rest, tokens: changed, removed };
+}
+
+/** Rebuild views and push the changes to browsers, at most once every 2.5s. */
 function scheduleMarketBroadcast() {
   if (marketTimer) return;
   const wait = Math.max(0, 2_500 - (Date.now() - lastMarketBroadcast));
@@ -259,7 +287,7 @@ function scheduleMarketBroadcast() {
     marketTimer = null;
     lastMarketBroadcast = Date.now();
     rebuildAll();
-    broadcast('market', marketPayload());
+    broadcast('marketDelta', marketDelta());
   }, wait);
 }
 
@@ -551,9 +579,6 @@ export function startMarket() {
     },
   });
 
-  // Seed the universe with the user's watchlist.
-  for (const w of state.watchlist) touch(w.mint, 'watch');
-
   every(20_000, 'jupiter', pollSolPrice, 0);
   every(30_000, 'jupiter', () => pollJupList('toptrending', '5m', 'trending'), 500);
   every(45_000, 'jupiter', () => pollJupList('toptraded', '5m', 'traded'), 2_000);
@@ -596,7 +621,8 @@ export function trackTraderToken(mint: string) {
   touch(mint, 'trader');
 }
 
-export function watchlistChanged() {
-  for (const w of state.watchlist) touch(w.mint, 'watch');
+/** A browser announcing the coins on its watchlist, so they keep being tracked. */
+export function keepWatching(mints: string[]) {
+  for (const m of mints) touch(m, 'watch');
   scheduleMarketBroadcast();
 }

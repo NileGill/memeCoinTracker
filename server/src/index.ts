@@ -1,5 +1,6 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import compression from 'compression';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Holding, HoldingsResponse, Snapshot, TokenDetail } from '../../shared/types';
 import { config, SOL_MINT } from './config';
@@ -10,9 +11,9 @@ import {
   launchList,
   marketPayload,
   migrationList,
+  keepWatching,
   onMigration,
   startMarket,
-  watchlistChanged,
 } from './engine/market';
 import {
   addTrader,
@@ -24,13 +25,17 @@ import {
   traderViews,
   updateTrader,
 } from './engine/traders';
-import { addClient, broadcast, clientCount, send } from './lib/bus';
+import { addClient, broadcast, canAcceptClient, clientCount, send } from './lib/bus';
 import { errMessage } from './lib/http';
 import { allStatus } from './lib/status';
-import { save, saveNow, state } from './lib/store';
+import { saveNow, state } from './lib/store';
 import { jupSearch, jupShield, jupTokens, ultraExecute, ultraHoldings, ultraOrder } from './sources/jupiter';
 import { newsList, onNews, startNews } from './sources/news';
 import { rugcheckSummary } from './sources/rugcheck';
+
+const indexHtml = path.join(config.webDist, 'index.html');
+/** e.g. "index-QxZedPTv.js": changes on every web build. */
+const webVersion = existsSync(indexHtml) ? (/assets\/(index-[\w-]+\.js)/.exec(readFileSync(indexHtml, 'utf8'))?.[1] ?? null) : null;
 
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const isAddress = (v: unknown): v is string => typeof v === 'string' && BASE58.test(v);
@@ -38,6 +43,7 @@ const isAddress = (v: unknown): v is string => typeof v === 'string' && BASE58.t
 function snapshot(): Snapshot {
   const lb = leaderboardState();
   return {
+    version: webVersion,
     market: marketPayload(),
     launches: launchList(),
     migrations: migrationList(),
@@ -46,28 +52,58 @@ function snapshot(): Snapshot {
     traderTrades: traderFeed(),
     leaderboard: lb.leaderboard,
     leaderboardUpdated: lb.leaderboardUpdated,
-    watchlist: state.watchlist.map((w) => w.mint),
     status: allStatus(),
   };
 }
 
 const app = express();
 app.disable('x-powered-by');
+// Behind a hosting proxy, the visitor's IP is in X-Forwarded-For.
+app.set('trust proxy', 1);
+// Gzip everything, including the live stream (bus.ts flushes after each event).
+app.use(compression());
 app.use(express.json({ limit: '256kb' }));
+
+/**
+ * Per-visitor rate limit for endpoints that call upstream APIs, so one visitor can't
+ * exhaust the shared Jupiter / RugCheck limits. 90 requests, refilling 1.5 per second.
+ */
+const buckets = new Map<string, { tokens: number; at: number }>();
+app.use('/api', (req, res, next) => {
+  if (req.path === '/stream' || req.path === '/health') return next();
+  const ip = req.ip ?? 'unknown';
+  const now = Date.now();
+  const b = buckets.get(ip) ?? { tokens: 90, at: now };
+  b.tokens = Math.min(90, b.tokens + ((now - b.at) / 1000) * 1.5);
+  b.at = now;
+  if (b.tokens < 1) {
+    buckets.set(ip, b);
+    return void res.status(429).json({ error: 'Too many requests. Slow down for a few seconds.' });
+  }
+  b.tokens -= 1;
+  buckets.set(ip, b);
+  next();
+});
+setInterval(() => {
+  const cutoff = Date.now() - 10 * 60_000;
+  for (const [ip, b] of buckets) if (b.at < cutoff) buckets.delete(ip);
+}, 60_000).unref();
 
 // ---------------------------------------------------------------- live stream
 
 app.get('/api/stream', (req, res) => {
+  const ip = req.ip ?? 'unknown';
+  if (!canAcceptClient(ip)) return void res.status(503).json({ error: 'Too many open connections' });
   res.set({
     'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache, no-transform',
+    'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
   res.flushHeaders();
   res.write('retry: 3000\n\n');
   send(res, 'snapshot', snapshot());
-  addClient(res);
+  addClient(res, ip);
 });
 
 app.get('/api/snapshot', (_req, res) => {
@@ -127,21 +163,13 @@ app.get('/api/search', async (req, res) => {
 
 // ---------------------------------------------------------------- watchlist
 
-app.post('/api/watchlist', (req, res) => {
-  const mint = req.body?.mint;
-  if (!isAddress(mint)) return void res.status(400).json({ error: 'Invalid token address' });
-  if (!state.watchlist.some((w) => w.mint === mint)) state.watchlist.push({ mint, addedAt: Date.now() });
-  save();
-  watchlistChanged();
-  broadcast('watchlist', state.watchlist.map((w) => w.mint));
-  res.json({ ok: true });
-});
-
-app.delete('/api/watchlist/:mint', (req, res) => {
-  state.watchlist = state.watchlist.filter((w) => w.mint !== req.params.mint);
-  save();
-  watchlistChanged();
-  broadcast('watchlist', state.watchlist.map((w) => w.mint));
+// Each browser keeps its own watchlist and re-announces it every few minutes so the
+// server keeps tracking those coins. Nothing is stored server-side.
+app.post('/api/watching', (req, res) => {
+  const mints = req.body?.mints;
+  if (!Array.isArray(mints) || mints.length > 100 || !mints.every(isAddress))
+    return void res.status(400).json({ error: 'Send up to 100 token addresses' });
+  keepWatching(mints);
   res.json({ ok: true });
 });
 
@@ -238,7 +266,6 @@ app.use('/api', (_req, res) => {
 
 // ---------------------------------------------------------------- web app
 
-const indexHtml = path.join(config.webDist, 'index.html');
 if (existsSync(indexHtml)) {
   app.use(express.static(config.webDist, { index: false, maxAge: '1h' }));
   app.use((_req, res) => {

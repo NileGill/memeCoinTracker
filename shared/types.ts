@@ -13,7 +13,7 @@ export type TokenSource =
   | 'launch' // fresh launch that is getting traction
   | 'graduated' // migrated off the pump.fun bonding curve
   | 'trader' // bought or sold by a watched trader
-  | 'watch' // on the user's watchlist
+  | 'watch' // on a visitor's watchlist
   | 'search'; // opened by the user
 
 export type FlagSeverity = 'info' | 'warn' | 'danger';
@@ -73,7 +73,6 @@ export interface TokenView {
   scoreParts: ScoreParts | null;
   flags: TokenFlag[];
   firstSeen: number;
-  updatedAt: number;
 }
 
 export interface LaunchItem {
@@ -182,7 +181,20 @@ export interface MarketPayload {
   time: number;
 }
 
+/** Sent every few seconds after the snapshot: only tokens that changed, plus removals. */
+export interface MarketDelta {
+  tokens: TokenView[];
+  removed: string[];
+  solPrice: number | null;
+  launchesLastHour: number;
+  graduationsLastHour: number;
+  startedAt: number;
+  time: number;
+}
+
 export interface Snapshot {
+  /** Name of the built web bundle; an open tab running an older bundle reloads itself. */
+  version: string | null;
   market: MarketPayload;
   launches: LaunchItem[];
   migrations: MigrationItem[];
@@ -191,7 +203,6 @@ export interface Snapshot {
   traderTrades: TraderTrade[];
   leaderboard: KolEntry[];
   leaderboardUpdated: number | null;
-  watchlist: string[];
   status: SourceStatus[];
 }
 

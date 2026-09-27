@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ALERT_ICONS, updateTitle } from '../lib/alerts';
 import { api, BASE58, type SearchResult } from '../lib/api';
 import { fmtAgo, fmtPrice, fmtSol, fmtUsd, shortAddr } from '../lib/format';
-import { connectWallet, disconnectWallet, PHANTOM_DOWNLOAD } from '../lib/phantom';
+import { connectWallet, disconnectWallet, PHANTOM_DOWNLOAD, phantomAppLink } from '../lib/phantom';
 import { clearAlerts, markAlertsRead, openToken, useStore, type AlertItem } from '../store';
 import { Icon } from './Icon';
 import { TokenIcon, useTick } from './common';
@@ -230,7 +230,9 @@ function WalletButton() {
           <span className="phantom-logo">
             <PhantomGlyph />
           </span>
-          <span className="hide-xs">{wallet.connecting ? 'Connecting…' : wallet.available ? 'Connect Phantom' : 'Get Phantom'}</span>
+          <span className="hide-xs">
+            {wallet.connecting ? 'Connecting…' : wallet.available ? 'Connect Phantom' : phantomAppLink() ? 'Open in Phantom' : 'Get Phantom'}
+          </span>
         </button>
         {err && (
           <div className="menu" style={{ padding: 12, fontSize: 13 }}>

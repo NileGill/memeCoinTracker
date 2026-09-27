@@ -25,6 +25,13 @@ export function getPhantom(): PhantomProvider | null {
 
 export const PHANTOM_DOWNLOAD = 'https://phantom.com/download';
 
+/** Phones have no browser extensions; this link reopens the site inside the Phantom app's browser. */
+export function phantomAppLink(): string | null {
+  const mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  if (!mobile || location.protocol !== 'https:') return null;
+  return `https://phantom.app/ul/browse/${encodeURIComponent(location.href)}?ref=${encodeURIComponent(location.origin)}`;
+}
+
 function errorText(e: unknown): string {
   const err = e as { code?: number; message?: string };
   if (err?.code === 4001) return 'Request cancelled in Phantom.';
@@ -96,6 +103,11 @@ export function initWallet() {
 export async function connectWallet(): Promise<string> {
   const p = getPhantom();
   if (!p) {
+    const appLink = phantomAppLink();
+    if (appLink) {
+      window.location.href = appLink;
+      throw new Error('Opening this site in the Phantom app…');
+    }
     window.open(PHANTOM_DOWNLOAD, '_blank', 'noopener');
     throw new Error('Phantom is not installed. Install it, then reload this page.');
   }

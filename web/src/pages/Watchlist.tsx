@@ -15,7 +15,7 @@ export function Watchlist() {
     <>
       <PageTitle
         title="Watchlist"
-        sub={`Coins you starred. You get an alert when one moves ${settings.watchPct}%+ in 5 minutes, either direction.`}
+        sub={`Coins you starred, saved in this browser. You get an alert when one moves ${settings.watchPct}%+ in 5 minutes, either direction.`}
       />
       <div className="panel">
         <TokenTable

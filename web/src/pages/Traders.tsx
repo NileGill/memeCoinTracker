@@ -4,7 +4,7 @@ import { Icon } from '../components/Icon';
 import { CopyButton, Empty, useTick } from '../components/common';
 import { api, BASE58 } from '../lib/api';
 import { fmtAgo, fmtNum, fmtSol, fmtUsd, hashColor, shortAddr } from '../lib/format';
-import { useStore } from '../store';
+import { forgetTrader, rememberTrader, useStore } from '../store';
 import { PageTitle, TraderTradeRow } from './shared';
 
 function AddTrader() {
@@ -22,6 +22,7 @@ function AddTrader() {
     setErr(null);
     try {
       await api.addTrader(a, label.trim());
+      rememberTrader(a, label.trim());
       setAddress('');
       setLabel('');
     } catch (e) {
@@ -72,7 +73,10 @@ function TraderCard({ t, selected, onSelect }: { t: TraderView; selected: boolea
             onChange={(e) => setName(e.target.value)}
             onBlur={async () => {
               setEditing(false);
-              if (name.trim() && name.trim() !== t.label) await api.updateTrader(t.address, { label: name.trim() }).catch(() => setName(t.label));
+              if (name.trim() && name.trim() !== t.label) {
+                await api.updateTrader(t.address, { label: name.trim() }).catch(() => setName(t.label));
+                if (useStore.getState().traders.some((x) => x.address === t.address)) rememberTrader(t.address, name.trim());
+              }
             }}
             onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
           />
@@ -125,7 +129,10 @@ function TraderCard({ t, selected, onSelect }: { t: TraderView; selected: boolea
           className="btn ghost xs"
           title="Stop watching"
           onClick={() => {
-            if (confirm(`Stop watching ${t.label}?`)) void api.removeTrader(t.address);
+            if (confirm(`Stop watching ${t.label}?`)) {
+              forgetTrader(t.address);
+              void api.removeTrader(t.address);
+            }
           }}
         >
           <Icon name="trash" size={14} />
@@ -263,7 +270,14 @@ export function Traders() {
                               <Icon name="check" size={11} /> watching
                             </span>
                           ) : (
-                            <button className="btn xs primary" disabled={traders.length >= 40} onClick={() => api.addTrader(k.address, k.name, 'kolscan')}>
+                            <button
+                              className="btn xs primary"
+                              disabled={traders.length >= 40}
+                              onClick={() => {
+                                rememberTrader(k.address, k.name);
+                                void api.addTrader(k.address, k.name, 'kolscan');
+                              }}
+                            >
                               <Icon name="plus" size={12} /> Watch
                             </button>
                           )}
