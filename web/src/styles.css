@@ -359,6 +359,11 @@ img {
   color: var(--text);
   border-color: var(--border-2);
 }
+.icon-btn.muted {
+  color: var(--red);
+  border-color: rgba(255, 95, 109, 0.4);
+  background: var(--red-bg);
+}
 .icon-btn .count {
   position: absolute;
   top: -4px;

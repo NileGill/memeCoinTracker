@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { ALERT_ICONS, updateTitle } from '../lib/alerts';
+import { ALERT_ICONS, beep, updateTitle } from '../lib/alerts';
 import { api, BASE58, type SearchResult } from '../lib/api';
 import { fmtAgo, fmtPrice, fmtSol, fmtUsd, shortAddr } from '../lib/format';
 import { connectWallet, disconnectWallet, PHANTOM_DOWNLOAD, phantomAppLink } from '../lib/phantom';
-import { clearAlerts, markAlertsRead, openToken, useStore, type AlertItem } from '../store';
+import { clearAlerts, markAlertsRead, openToken, updateSettings, useStore, type AlertItem } from '../store';
 import { Icon } from './Icon';
 import { TokenIcon, useTick } from './common';
 
@@ -204,6 +204,25 @@ function Alerts() {
   );
 }
 
+/** Mute / unmute alert sounds. Same setting as the Sound toggle in Settings. */
+function SoundButton() {
+  const sound = useStore((s) => s.settings.sound);
+  return (
+    <button
+      className={`icon-btn ${sound ? '' : 'muted'}`}
+      title={sound ? 'Mute alert sounds' : 'Unmute alert sounds'}
+      aria-label={sound ? 'Mute alert sounds' : 'Unmute alert sounds'}
+      aria-pressed={!sound}
+      onClick={() => {
+        updateSettings({ sound: !sound });
+        if (!sound) beep('normal'); // confirm sound is back on
+      }}
+    >
+      <Icon name={sound ? 'sound' : 'mute'} size={17} />
+    </button>
+  );
+}
+
 function WalletButton() {
   const wallet = useStore((s) => s.wallet);
   const [open, setOpen] = useState(false);
@@ -321,6 +340,7 @@ export function Header() {
         <span className="muted">1 SOL =</span>
         {fmtPrice(solPrice)}
       </span>
+      <SoundButton />
       <Alerts />
       <WalletButton />
     </header>
