@@ -30,9 +30,9 @@ export function Dashboard() {
     <>
       <div className="kpis">
         <div className="kpi">
-          <div className="label">SOL</div>
+          <div className="label">SOL price</div>
           <div className="value num">{fmtPrice(solPrice)}</div>
-          <div className="hint">live via Jupiter</div>
+          <div className="hint">price of 1 SOL, live</div>
         </div>
         <div className="kpi">
           <div className="label">Hot setups</div>

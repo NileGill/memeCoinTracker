@@ -55,7 +55,7 @@ export function Portfolio() {
           <div className="hint">SOL + priced tokens</div>
         </div>
         <div className="kpi">
-          <div className="label">SOL</div>
+          <div className="label">Your SOL</div>
           <div className="value num">{h ? fmtSol(h.sol) : '…'}</div>
           <div className="hint">{fmtUsd(h?.solValueUsd)}</div>
         </div>

@@ -308,7 +308,7 @@ export function Header() {
       <Search />
       <span className="spacer" />
       <LiveStatus />
-      <span className="sol-price hide-xs" title="SOL price">
+      <span className="sol-price hide-xs" title="Current price of 1 SOL (not your balance)">
         <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
           <defs>
             <linearGradient id="solg" x1="0" x2="1" y1="0" y2="1">
@@ -318,6 +318,7 @@ export function Header() {
           </defs>
           <path fill="url(#solg)" d="M5 16.5h14l-3 3H2l3-3Zm0-6h14l-3 3H2l3-3ZM8 4.5h14l-3 3H5l3-3Z" />
         </svg>
+        <span className="muted">1 SOL =</span>
         {fmtPrice(solPrice)}
       </span>
       <Alerts />
