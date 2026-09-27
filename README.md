@@ -82,11 +82,18 @@ Your watchlist is saved in your browser, so every visitor has their own. The sha
 
 ## Hosting it online (free)
 
-The repo includes a [Render](https://render.com) Blueprint (`render.yaml`), so the site runs on Render's free plan and redeploys automatically on every push to `main`.
+The repo includes a [Render](https://render.com) Blueprint (`render.yaml`), so the site runs on Render's free plan.
 
 1. Sign in at [render.com](https://render.com) with GitHub.
 2. Click **New → Blueprint**, pick the `memeCoinTracker` repo, then **Apply**.
 3. After the first build (~3 minutes), your address is shown at the top of the service page in Render. It looks like `https://memeradar-xxxx.onrender.com`. **Use that exact link.** Plain `memeradar.onrender.com` belongs to someone else's unrelated site.
+
+**Automatic updates.** A GitHub Action (`.github/workflows/deploy.yml`) type-checks and builds every push to `main`, then tells Render to deploy, so broken code never goes live. It needs one secret:
+
+1. In Render, open the service, go to **Settings**, and copy the **Deploy Hook** URL. Keep it private: anyone with it can trigger deploys.
+2. In GitHub, open the repo's **Settings → Secrets and variables → Actions → New repository secret**. Set the name to `RENDER_DEPLOY_HOOK` and paste the URL as the value.
+
+(If you instead connect Render to your GitHub account and turn on Auto-Deploy, leave the secret unset to avoid double deploys.)
 
 Good to know about the free plan:
 
