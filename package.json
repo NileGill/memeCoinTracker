@@ -1,0 +1,39 @@
+{
+  "name": "meme-radar",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Live Solana memecoin terminal: trending coins, new launches, news, trader tracking, alerts and Phantom trading via Jupiter.",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c cyan,magenta \"tsx watch server/src/index.ts\" \"vite\"",
+    "build": "vite build",
+    "start": "vite build && tsx server/src/index.ts",
+    "serve": "tsx server/src/index.ts",
+    "typecheck": "tsc -p tsconfig.server.json && tsc -p tsconfig.web.json"
+  },
+  "engines": {
+    "node": ">=20.19"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.99.0",
+    "buffer": "^6.0.3",
+    "express": "^5.2.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "rss-parser": "^3.13.0",
+    "tsx": "^4.23.15",
+    "ws": "^8.22.0",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.5",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.1"
+  }
+}
