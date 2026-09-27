@@ -41,5 +41,18 @@ jobs:
             echo "::warning::RENDER_DEPLOY_HOOK secret is not set, so the live site was not updated."
             exit 0
           fi
-          curl -fsS -X POST "$RENDER_DEPLOY_HOOK" > /dev/null
-          echo "Render deploy started. The site updates in about 3 minutes."
+          # A deploy hook looks like https://api.render.com/deploy/srv-...?key=...
+          # (Pasting the site's own address would "succeed" without deploying anything.)
+          case "$RENDER_DEPLOY_HOOK" in
+            https://api.render.com/deploy/srv-*) ;;
+            *)
+              echo "::error::RENDER_DEPLOY_HOOK is not a Render deploy hook. In Render open the service > Settings > Deploy Hook, copy the URL that starts with https://api.render.com/deploy/srv- and save it as the secret."
+              exit 1
+              ;;
+          esac
+          RESPONSE=$(curl -sS -w '\nHTTP %{http_code}' -X POST "$RENDER_DEPLOY_HOOK")
+          echo "$RESPONSE" | sed 's/key=[^&"]*/key=***/g'
+          case "$RESPONSE" in
+            *"HTTP 2"*) echo "Render deploy started. The site updates in about 3 minutes." ;;
+            *) echo "::error::Render rejected the deploy request. Check the RENDER_DEPLOY_HOOK secret."; exit 1 ;;
+          esac
