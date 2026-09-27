@@ -5,6 +5,7 @@ import { CopyButton, Empty, useTick } from '../components/common';
 import { api, BASE58 } from '../lib/api';
 import { fmtAgo, fmtNum, fmtSol, fmtUsd, hashColor, shortAddr } from '../lib/format';
 import { forgetTrader, rememberTrader, useStore } from '../store';
+import { useIsPhone } from '../lib/useMedia';
 import { PageTitle, TraderTradeRow } from './shared';
 
 function AddTrader() {
@@ -151,6 +152,11 @@ export function Traders() {
   const [selected, setSelected] = useState<string | null>(null);
   const [side, setSide] = useState<'all' | 'buy' | 'sell'>('all');
   const watched = useMemo(() => new Set(traders.map((t) => t.address)), [traders]);
+  const mobile = useIsPhone();
+  const watchKol = (address: string, name: string) => {
+    rememberTrader(address, name);
+    void api.addTrader(address, name, 'kolscan');
+  };
 
   const feed = trades.filter((t) => (!selected || t.trader === selected) && (side === 'all' || t.side === side));
   const selectedLabel = traders.find((t) => t.address === selected)?.label;
@@ -221,7 +227,48 @@ export function Traders() {
               kolscan.io ↗
             </a>
           </div>
-          {leaderboard.length ? (
+          {leaderboard.length && mobile ? (
+            <div className="mlist">
+              {leaderboard.map((k) => {
+                const total = k.wins + k.losses;
+                return (
+                  <div key={k.address} className="mrow" style={{ cursor: 'default' }}>
+                    <span className="dim num" style={{ width: 20, textAlign: 'right' }}>
+                      {k.rank}
+                    </span>
+                    <div className="avatar" style={{ background: hashColor(k.address), width: 32, height: 32, fontSize: 12 }}>
+                      {k.name.replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase() || '?'}
+                    </div>
+                    <div className="mrow-main">
+                      <div className="mrow-top">
+                        <b className="truncate">{k.name}</b>
+                      </div>
+                      <div className="mrow-sub">
+                        <span className="up">{k.wins}W</span> / <span className="down">{k.losses}L</span>
+                        {total ? ` · ${((k.wins / total) * 100).toFixed(0)}% wins` : ''}
+                      </div>
+                    </div>
+                    <div className="mrow-right num">
+                      <div className={k.profitSol >= 0 ? 'up' : 'down'}>
+                        {k.profitSol >= 0 ? '+' : ''}
+                        {fmtNum(k.profitSol)} SOL
+                      </div>
+                      <div className="dim">{fmtUsd(k.profitUsd, { sign: true })}</div>
+                    </div>
+                    {watched.has(k.address) ? (
+                      <span className="badge green">
+                        <Icon name="check" size={11} />
+                      </span>
+                    ) : (
+                      <button className="btn xs primary" disabled={traders.length >= 40} onClick={() => watchKol(k.address, k.name)}>
+                        Watch
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : leaderboard.length ? (
             <div className="table-wrap">
               <table className="t">
                 <thead>

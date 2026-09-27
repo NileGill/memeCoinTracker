@@ -34,6 +34,13 @@ export function TradePanel({ token, initialSide }: { token: TokenView; initialSi
 
   useEffect(() => setSide(initialSide), [initialSide, token.mint]);
 
+  // The pinned Buy / Sell bar on phones switches sides from outside the panel.
+  useEffect(() => {
+    const onSide = (e: Event) => setSide((e as CustomEvent<'buy' | 'sell'>).detail);
+    window.addEventListener('memeradar:trade-side', onSide);
+    return () => window.removeEventListener('memeradar:trade-side', onSide);
+  }, []);
+
   const holding = wallet.holdings?.tokens.find((h) => h.mint === token.mint) ?? null;
   const decimals = token.decimals ?? holding?.decimals ?? null;
   const solBalance = wallet.holdings?.sol ?? null;
@@ -164,7 +171,7 @@ export function TradePanel({ token, initialSide }: { token: TokenView; initialSi
   const presetsSell = [25, 50, 75, 100];
 
   return (
-    <div className="trade">
+    <div className="trade" id="trade-panel">
       <div className="row">
         <div className="seg">
           <button className={side === 'buy' ? 'on buy' : ''} onClick={() => setSide('buy')}>

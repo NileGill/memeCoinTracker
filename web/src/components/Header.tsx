@@ -4,6 +4,7 @@ import { api, BASE58, type SearchResult } from '../lib/api';
 import { authApi, signedOut } from '../lib/auth';
 import { fmtAgo, fmtPrice, fmtSol, fmtUsd, hashColor, shortAddr } from '../lib/format';
 import { connectWallet, disconnectWallet, PHANTOM_DOWNLOAD, phantomAppLink } from '../lib/phantom';
+import { useIsPhone } from '../lib/useMedia';
 import { clearAlerts, markAlertsRead, openToken, updateSettings, useStore, type AlertItem } from '../store';
 import { Icon } from './Icon';
 import { TokenIcon, useTick } from './common';
@@ -32,7 +33,28 @@ function Search() {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [hl, setHl] = useState(0);
-  const ref = useOutsideClose(open, () => setOpen(false));
+  const mobile = useIsPhone();
+  // On phones the search box is an icon that opens a full-width bar.
+  const [expanded, setExpanded] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const ref = useOutsideClose(open || expanded, () => {
+    setOpen(false);
+    if (!q) setExpanded(false);
+  });
+
+  // Press "/" anywhere (outside a text box) to jump to search.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (e.key === '/' && tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') {
+        e.preventDefault();
+        setExpanded(true);
+        setTimeout(() => inputRef.current?.focus(), 0);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
 
   useEffect(() => {
     const query = q.trim();
@@ -59,13 +81,44 @@ function Search() {
     openToken(mint);
     setOpen(false);
     setQ('');
+    setExpanded(false);
   };
 
+  if (mobile && !expanded) {
+    return (
+      <button
+        className="icon-btn"
+        aria-label="Search coins"
+        onClick={() => {
+          setExpanded(true);
+          setTimeout(() => inputRef.current?.focus(), 0);
+        }}
+      >
+        <Icon name="search" size={17} />
+      </button>
+    );
+  }
+
   return (
-    <div className="search" ref={ref}>
+    <div className={`search ${mobile ? 'search-mobile' : ''}`} ref={ref}>
       <Icon name="search" size={15} />
+      {mobile && (
+        <button
+          className="search-close"
+          aria-label="Close search"
+          onClick={() => {
+            setExpanded(false);
+            setOpen(false);
+            setQ('');
+          }}
+        >
+          <Icon name="x" size={16} />
+        </button>
+      )}
       <input
-        placeholder="Search any coin by name, ticker or address…"
+        ref={inputRef}
+        placeholder={mobile ? 'Search coins or paste an address' : 'Search any coin by name, ticker or address…  (press /)'}
+        enterKeyHint="search"
         value={q}
         onChange={(e) => {
           setQ(e.target.value);
@@ -73,7 +126,11 @@ function Search() {
         }}
         onFocus={() => setOpen(true)}
         onKeyDown={(e) => {
-          if (e.key === 'ArrowDown') setHl((h) => Math.min(h + 1, results.length - 1));
+          if (e.key === 'Escape') {
+            setOpen(false);
+            setExpanded(false);
+            (e.target as HTMLInputElement).blur();
+          } else if (e.key === 'ArrowDown') setHl((h) => Math.min(h + 1, results.length - 1));
           else if (e.key === 'ArrowUp') setHl((h) => Math.max(h - 1, 0));
           else if (e.key === 'Enter') {
             const v = q.trim();
@@ -373,6 +430,9 @@ export function Header() {
   const solPrice = useStore((s) => s.solPrice);
   return (
     <header className="header">
+      <a href="#/" className="header-logo" aria-label="MemeRadar home">
+        <Icon name="radar" size={24} />
+      </a>
       <Search />
       <span className="spacer" />
       <LiveStatus />

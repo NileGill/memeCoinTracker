@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { useStore } from '../store';
 import { Icon, type IconName } from './Icon';
 
@@ -15,7 +16,7 @@ export type Route =
 
 export const ROUTES: { id: Route; label: string; short: string; icon: IconName }[] = [
   { id: 'dashboard', label: 'Dashboard', short: 'Home', icon: 'dashboard' },
-  { id: 'setups', label: 'Best trades', short: 'Setups', icon: 'target' },
+  { id: 'setups', label: 'Best trades', short: 'Best', icon: 'target' },
   { id: 'market', label: 'Trending', short: 'Trending', icon: 'fire' },
   { id: 'launches', label: 'New launches', short: 'New', icon: 'rocket' },
   { id: 'traders', label: 'Top traders', short: 'Traders', icon: 'users' },
@@ -58,13 +59,69 @@ export function Nav({ route }: { route: Route }) {
           Not financial advice.
         </div>
       </nav>
+      <MobileNav route={route} hot={hot} />
+    </>
+  );
+}
+
+/** Phone tab bar: the four most-used pages plus "More" for everything else. */
+const PRIMARY: Route[] = ['dashboard', 'setups', 'launches', 'traders'];
+
+function MobileNav({ route, hot }: { route: Route; hot: number }) {
+  const [more, setMore] = useState(false);
+  const loggedIn = useStore((s) => s.auth.status === 'user');
+  const authOn = useStore((s) => s.auth.status === 'user' || s.auth.status === 'guest');
+  useEffect(() => setMore(false), [route]);
+  const secondary = ROUTES.filter((r) => !PRIMARY.includes(r.id));
+  const moreActive = !PRIMARY.includes(route);
+  const href = (id: Route) => `#/${id === 'dashboard' ? '' : id}`;
+
+  return (
+    <>
+      {more && <div className="sheet-backdrop" onClick={() => setMore(false)} />}
+      {more && (
+        <div className="sheet" role="menu">
+          {secondary.map((r) => (
+            <a key={r.id} href={href(r.id)} className={route === r.id ? 'active' : ''} role="menuitem">
+              <Icon name={r.icon} size={20} />
+              {r.label}
+            </a>
+          ))}
+          {authOn && (
+            <a
+              href="#/account"
+              className={route === 'account' ? 'active' : ''}
+              role="menuitem"
+              onClick={(e) => {
+                if (!loggedIn) {
+                  e.preventDefault();
+                  setMore(false);
+                  useStore.setState({ authModal: 'login' });
+                }
+              }}
+            >
+              <Icon name="user" size={20} />
+              {loggedIn ? 'Account' : 'Log in'}
+            </a>
+          )}
+        </div>
+      )}
       <nav className="mobile-nav">
-        {ROUTES.map((r) => (
-          <a key={r.id} href={`#/${r.id === 'dashboard' ? '' : r.id}`} className={route === r.id ? 'active' : ''}>
-            <Icon name={r.icon} size={18} />
+        {ROUTES.filter((r) => PRIMARY.includes(r.id)).map((r) => (
+          <a key={r.id} href={href(r.id)} className={route === r.id ? 'active' : ''}>
+            <span className="mnav-icon">
+              <Icon name={r.icon} size={20} />
+              {r.id === 'setups' && hot > 0 && <span className="mnav-dot" />}
+            </span>
             {r.short}
           </a>
         ))}
+        <button className={moreActive || more ? 'active' : ''} onClick={() => setMore((m) => !m)} aria-expanded={more}>
+          <span className="mnav-icon">
+            <Icon name="list" size={20} />
+          </span>
+          More
+        </button>
       </nav>
     </>
   );

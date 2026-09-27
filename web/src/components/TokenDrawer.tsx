@@ -78,18 +78,18 @@ export function TokenDrawer() {
           {t ? (
             <>
               <TokenIcon src={t.icon} symbol={t.symbol} size="lg" />
-              <div style={{ minWidth: 0 }}>
+              <div className="drawer-title">
                 <div className="row" style={{ gap: 8 }}>
-                  <b style={{ fontSize: 19 }}>{t.symbol}</b>
-                  {t.verified && <span className="badge green">Verified</span>}
+                  <b className="drawer-symbol">{t.symbol}</b>
+                  {t.verified && <span className="badge green hide-sm">Verified</span>}
                   {t.score != null && <span className={`score ${scoreClass(t.score)}`}>{t.score}</span>}
                 </div>
                 <div className="muted truncate" style={{ fontSize: 13 }}>
                   {t.name}
                 </div>
               </div>
-              <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
-                <div className="num" style={{ fontWeight: 800, fontSize: 19 }}>
+              <div className="drawer-price">
+                <div className="num drawer-price-value">
                   {fmtPrice(t.priceUsd)}
                 </div>
                 <div className={`num ${pctClass(t.change.h24)}`} style={{ fontSize: 13 }}>
@@ -258,7 +258,7 @@ export function TokenDrawer() {
               </div>
             )}
 
-            <div className="links">
+            <div className="links" style={{ marginBottom: 8 }}>
               {t.links.website && (
                 <a href={t.links.website} target="_blank" rel="noreferrer">
                   <Icon name="globe" size={13} /> Website
@@ -298,6 +298,22 @@ export function TokenDrawer() {
                 </a>
               )}
             </div>
+          </div>
+        )}
+        {t && (
+          <div className="drawer-actions">
+            {(['buy', 'sell'] as const).map((side) => (
+              <button
+                key={side}
+                className={`btn lg ${side}`}
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent('memeradar:trade-side', { detail: side }));
+                  document.getElementById('trade-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }}
+              >
+                {side === 'buy' ? `Buy ${t.symbol}` : `Sell ${t.symbol}`}
+              </button>
+            ))}
           </div>
         )}
       </aside>

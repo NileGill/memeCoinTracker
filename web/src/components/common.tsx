@@ -104,9 +104,9 @@ export function ScoreBar({ label, v, signed }: { label: string; v: number; signe
   );
 }
 
-export function FlagIcons({ flags }: { flags: TokenFlag[] }) {
+export function FlagIcons({ flags, hideEmpty = false }: { flags: TokenFlag[]; hideEmpty?: boolean }) {
   const shown = flags.filter((f) => f.severity !== 'info' || f.code === 'new' || f.code === 'boosted').slice(0, 4);
-  if (!shown.length) return <span className="dim">—</span>;
+  if (!shown.length) return hideEmpty ? null : <span className="dim">—</span>;
   return (
     <span className="flags">
       {shown.map((f) => (

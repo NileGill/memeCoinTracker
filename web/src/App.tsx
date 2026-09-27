@@ -60,7 +60,9 @@ export function App() {
       <Nav route={route} />
       <Header />
       <main className="main">
-        <Page />
+        <div className="main-inner">
+          <Page />
+        </div>
       </main>
       <TokenDrawer />
       <AuthModal />

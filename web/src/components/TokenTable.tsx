@@ -1,8 +1,9 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import type { TokenView } from '../../../shared/types';
 import { fmtAge, fmtNum, fmtPrice, fmtUsd } from '../lib/format';
+import { useCompactLists } from '../lib/useMedia';
 import { openToken, priceMoves } from '../store';
-import { Empty, FlagIcons, Pct, Pressure, ScoreBadge, Sparkline, StarButton, TokenCell } from './common';
+import { Empty, FlagIcons, Pct, Pressure, ScoreBadge, Sparkline, StarButton, TokenCell, TokenIcon } from './common';
 
 export type Col =
   | 'rank'
@@ -47,9 +48,9 @@ const COLS: Record<Col, ColDef> = {
   price: { label: 'Price', sort: (t) => t.priceUsd, render: (t) => <span className="num">{fmtPrice(t.priceUsd)}</span> },
   m5: { label: '5m', sort: (t) => t.change.m5, render: (t) => <Pct v={t.change.m5} /> },
   h1: { label: '1h', sort: (t) => t.change.h1, render: (t) => <Pct v={t.change.h1} /> },
-  h6: { label: '6h', hide: 'hide-sm', sort: (t) => t.change.h6, render: (t) => <Pct v={t.change.h6} /> },
-  h24: { label: '24h', hide: 'hide-sm', sort: (t) => t.change.h24, render: (t) => <Pct v={t.change.h24} /> },
-  vol5m: { label: 'Vol 5m', hide: 'hide-sm', sort: (t) => t.volume.m5, render: (t) => fmtUsd(t.volume.m5) },
+  h6: { label: '6h', hide: 'hide-sm hide-md', sort: (t) => t.change.h6, render: (t) => <Pct v={t.change.h6} /> },
+  h24: { label: '24h', hide: 'hide-sm hide-md', sort: (t) => t.change.h24, render: (t) => <Pct v={t.change.h24} /> },
+  vol5m: { label: 'Vol 5m', hide: 'hide-sm hide-lg', sort: (t) => t.volume.m5, render: (t) => fmtUsd(t.volume.m5) },
   vol1h: { label: 'Vol 1h', sort: (t) => t.volume.h1, render: (t) => fmtUsd(t.volume.h1) },
   vol24h: { label: 'Vol 24h', hide: 'hide-sm', sort: (t) => t.volume.h24, render: (t) => fmtUsd(t.volume.h24) },
   liq: { label: 'Liquidity', sort: (t) => t.liquidity, render: (t) => fmtUsd(t.liquidity) },
@@ -60,11 +61,11 @@ const COLS: Record<Col, ColDef> = {
     sort: (t) => (t.createdAt ? -t.createdAt : null),
     render: (t) => <span className="muted">{fmtAge(t.createdAt)}</span>,
   },
-  holders: { label: 'Holders', hide: 'hide-sm', sort: (t) => t.holders, render: (t) => fmtNum(t.holders, 0) },
+  holders: { label: 'Holders', hide: 'hide-sm hide-lg', sort: (t) => t.holders, render: (t) => fmtNum(t.holders, 0) },
   pressure: {
     label: 'Buys 5m',
     cls: 'c',
-    hide: 'hide-sm',
+    hide: 'hide-sm hide-md',
     sort: (t) => {
       const b = t.buyVolume.m5 ?? t.txns.m5?.buys;
       const s = t.sellVolume.m5 ?? t.txns.m5?.sells;
@@ -79,7 +80,7 @@ const COLS: Record<Col, ColDef> = {
     title: 'Share of 5-minute volume that was buying',
   },
   flags: { label: 'Risk', cls: 'c', render: (t) => <FlagIcons flags={t.flags} /> },
-  spark: { label: 'Live', cls: 'c', hide: 'hide-xs', render: (t) => <Sparkline mint={t.mint} /> },
+  spark: { label: 'Live', cls: 'c', hide: 'hide-xs hide-laptop', render: (t) => <Sparkline mint={t.mint} /> },
   actions: {
     label: '',
     cls: 'c',
@@ -118,6 +119,7 @@ export function TokenTable({
 }) {
   const [sort, setSort] = useState<{ col: Col; desc: boolean } | null>(presorted ? null : (defaultSort ?? null));
   const [shown, setShown] = useState(limit);
+  const mobile = useCompactLists();
 
   const rows = useMemo(() => {
     if (!sort) return tokens;
@@ -135,6 +137,73 @@ export function TokenTable({
 
   if (!tokens.length) return <Empty>{empty}</Empty>;
   const now = Date.now();
+
+  if (mobile) {
+    const sortable = columns.filter((c) => COLS[c].sort);
+    return (
+      <div>
+        {sortable.length > 0 && (
+          <div className="mlist-sort">
+            <span className="muted">Sort by</span>
+            <select
+              className="input"
+              value={sort ? `${sort.col}:${sort.desc ? 'd' : 'a'}` : ''}
+              onChange={(e) => {
+                const [col, dir] = e.target.value.split(':');
+                setSort(col ? { col: col as Col, desc: dir === 'd' } : null);
+              }}
+            >
+              {presorted && <option value="">Best first</option>}
+              {sortable.map((c) => (
+                <option key={c} value={`${c}:d`}>
+                  {c === 'age' ? 'Newest' : `${COLS[c].label} (high to low)`}
+                </option>
+              ))}
+              {sortable.includes('m5') && <option value="m5:a">5m (biggest drops)</option>}
+            </select>
+          </div>
+        )}
+        <div className="mlist">
+          {rows.slice(0, shown).map((t) => {
+            const mv = priceMoves.get(t.mint);
+            const flash = mv && now - mv.at < 1500 ? `flash-${mv.dir}-${mv.seq % 2}` : '';
+            return (
+              <div key={t.mint} className={`mrow ${flash}`} onClick={() => openToken(t.mint)}>
+                <TokenIcon src={t.icon} symbol={t.symbol} />
+                <div className="mrow-main">
+                  <div className="mrow-top">
+                    <b className="truncate">{t.symbol}</b>
+                    {columns.includes('flags') && <FlagIcons flags={t.flags} hideEmpty />}
+                  </div>
+                  <div className="mrow-sub">
+                    {fmtUsd(t.mcap)} mcap · liq {fmtUsd(t.liquidity)} · {fmtAge(t.createdAt)}
+                  </div>
+                </div>
+                <div className="mrow-right num">
+                  <div>{fmtPrice(t.priceUsd)}</div>
+                  <div>
+                    <Pct v={t.change.m5} /> <span className="dim">5m</span>
+                  </div>
+                  <div>
+                    <Pct v={t.change.h1} /> <span className="dim">1h</span>
+                  </div>
+                </div>
+                {columns.includes('score') && <ScoreBadge t={t} />}
+                <StarButton mint={t.mint} size={18} />
+              </div>
+            );
+          })}
+        </div>
+        {rows.length > shown && (
+          <div style={{ padding: 12, textAlign: 'center' }}>
+            <button className="btn" onClick={() => setShown((n) => n + limit)}>
+              Show more ({rows.length - shown} left)
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="table-wrap">

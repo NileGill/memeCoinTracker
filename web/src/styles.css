@@ -1759,3 +1759,427 @@ img.ticon.loaded {
     font-size: 19px;
   }
 }
+
+/* ================================================================== mobile & desktop polish */
+
+.header-logo {
+  display: none;
+  color: var(--accent-2);
+  flex-shrink: 0;
+}
+.main-inner {
+  max-width: 1760px;
+  margin: 0 auto;
+}
+
+/* ---- phone card lists (replace wide tables under 700px) */
+.mlist {
+  display: flex;
+  flex-direction: column;
+}
+.mrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  border-bottom: 1px solid rgba(35, 43, 61, 0.6);
+  cursor: pointer;
+  min-width: 0;
+}
+.mrow:last-child {
+  border-bottom: 0;
+}
+.mrow:active {
+  background: var(--panel-2);
+}
+.mrow-main {
+  flex: 1;
+  min-width: 0;
+}
+.mrow-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14.5px;
+  min-width: 0;
+}
+.mrow-sub {
+  font-size: 11.5px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mrow-right {
+  text-align: right;
+  font-size: 12px;
+  line-height: 1.35;
+  flex-shrink: 0;
+}
+.mrow-right > div:first-child {
+  font-size: 13px;
+  font-weight: 650;
+}
+.mrow.flash-up-0,
+.mrow.flash-up-1 {
+  animation: flashUpA 1.2s ease-out;
+}
+.mrow.flash-down-0,
+.mrow.flash-down-1 {
+  animation: flashDownA 1.2s ease-out;
+}
+.mlist-sort {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.mlist-sort .input {
+  width: auto;
+  flex: 1;
+}
+
+/* ---- phone tab bar + "More" sheet */
+.mobile-nav button {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+  border-radius: var(--radius-sm);
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+.mobile-nav button.active {
+  color: var(--text);
+  background: var(--accent-bg);
+}
+.mnav-icon {
+  position: relative;
+  display: inline-flex;
+}
+.mnav-dot {
+  position: absolute;
+  top: -2px;
+  right: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 2px var(--bg-2);
+}
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 44;
+  background: rgba(3, 5, 9, 0.5);
+  animation: fadeIn 0.15s ease-out;
+}
+.sheet {
+  position: fixed;
+  left: 8px;
+  right: 8px;
+  bottom: calc(66px + env(safe-area-inset-bottom));
+  z-index: 46;
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  animation: sheetUp 0.18s ease-out;
+}
+.sheet a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 12px;
+  border-radius: 10px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.sheet a.active,
+.sheet a:active {
+  background: var(--accent-bg);
+  color: var(--text);
+}
+@keyframes sheetUp {
+  from {
+    transform: translateY(12px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* ---- pinned Buy / Sell bar inside a coin's page (phones) */
+.drawer-actions {
+  display: none;
+}
+
+/* ---- wide desktops */
+@media (min-width: 1500px) {
+  .drawer {
+    width: 880px;
+  }
+  .chart-frame {
+    height: 480px;
+  }
+}
+
+/* ---- tablets and phones */
+@media (max-width: 960px) {
+  :root {
+    --header: calc(58px + env(safe-area-inset-top));
+  }
+  .header {
+    padding-top: env(safe-area-inset-top);
+  }
+  .header-logo {
+    display: inline-flex;
+  }
+  /* iOS zooms into any text box under 16px; keep them at 16px so it doesn't. */
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+  .search-mobile {
+    position: fixed;
+    top: env(safe-area-inset-top);
+    left: 0;
+    right: 0;
+    height: 58px;
+    max-width: none;
+    z-index: 48;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .search-mobile > svg {
+    left: 24px;
+  }
+  .search-mobile input {
+    padding-right: 44px;
+  }
+  .search-close {
+    position: absolute;
+    right: 18px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 1;
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 50%;
+    background: var(--panel-3);
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .search-mobile .search-results {
+    position: fixed;
+    top: calc(58px + env(safe-area-inset-top));
+    left: 8px;
+    right: 8px;
+    max-height: calc(100vh - 160px);
+  }
+  .mobile-nav {
+    justify-content: space-around;
+    overflow-x: visible;
+  }
+  .mobile-nav a,
+  .mobile-nav button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .drawer {
+    width: 100vw;
+  }
+  .drawer-body {
+    padding: 12px 12px 8px;
+  }
+  .chart-frame {
+    height: 300px;
+  }
+  .drawer-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    position: sticky;
+    bottom: 0;
+    z-index: 3;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    background: linear-gradient(to bottom, rgba(14, 18, 26, 0), var(--bg-2) 28%);
+  }
+  .drawer-actions .btn {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .panel-body {
+    padding: 12px;
+  }
+  .kpi .value {
+    font-size: 19px;
+  }
+}
+
+/* ---- touch screens: fingertip-sized targets */
+@media (pointer: coarse) {
+  .btn.xs {
+    min-height: 34px;
+    padding: 6px 12px;
+  }
+  .btn.sm {
+    min-height: 38px;
+  }
+  .chip {
+    padding: 8px 14px;
+  }
+  .star {
+    padding: 9px;
+    margin: -6px;
+  }
+  .icon-btn {
+    width: 40px;
+    height: 40px;
+  }
+  /* Same size as the iPhone switch. */
+  .toggle {
+    width: 51px;
+    height: 31px;
+  }
+  .toggle::after {
+    width: 25px;
+    height: 25px;
+  }
+  .toggle.on::after {
+    transform: translateX(20px);
+  }
+  /* Bigger invisible hit area for the small "All →" links, without changing the layout. */
+  .panel-head a.more {
+    padding: 12px 4px;
+    margin: -12px -4px -12px auto;
+  }
+  .seg button {
+    padding: 9px 14px;
+  }
+  .feed-item {
+    padding-top: 11px;
+    padding-bottom: 11px;
+  }
+  /* No hover on touch: the score breakdown opens from the coin's page instead. */
+  .tip:hover > .tip-box {
+    display: none;
+  }
+}
+
+@media (max-width: 600px) {
+  /* Phones: keep page headers short so the coins show up sooner. */
+  .page-title {
+    margin-bottom: 10px;
+  }
+  .page-title p {
+    display: none;
+  }
+  .page-title .input {
+    width: 100% !important;
+  }
+  .page-title > .spacer {
+    display: none;
+  }
+  .main select.input {
+    padding: 6px 10px;
+  }
+}
+
+/* Coin page header: the name shrinks (with …) instead of running into the price. */
+.drawer-title {
+  flex: 1;
+  min-width: 0;
+}
+.drawer-symbol {
+  font-size: 19px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drawer-price {
+  flex-shrink: 0;
+  text-align: right;
+}
+.drawer-price-value {
+  font-weight: 800;
+  font-size: 19px;
+}
+
+@media (max-width: 700px) {
+  .drawer-head {
+    gap: 8px;
+    padding: 10px 12px;
+    padding-top: calc(10px + env(safe-area-inset-top));
+  }
+  .drawer-head .ticon-wrap.lg {
+    width: 38px;
+    height: 38px;
+  }
+  .drawer-symbol,
+  .drawer-price-value {
+    font-size: 16px;
+  }
+  /* Alerts drop in from the top on phones (two at a time) so they never cover the trade buttons. */
+  .toasts {
+    /* Just below the top bar, so search and the close button stay reachable. */
+    top: calc(env(safe-area-inset-top) + 64px);
+    bottom: auto;
+    flex-direction: column;
+    right: 8px;
+    width: calc(100vw - 16px);
+  }
+  .toast:nth-child(n + 3) {
+    display: none;
+  }
+  .toast {
+    padding: 10px 12px;
+  }
+}
+
+/* Desktop tables drop their least important columns as the screen narrows, instead of scrolling sideways. */
+@media (max-width: 1799px) {
+  .hide-lg {
+    display: none !important;
+  }
+}
+@media (max-width: 1599px) {
+  .hide-md {
+    display: none !important;
+  }
+  table.t th,
+  table.t td {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .token-cell {
+    max-width: 210px;
+  }
+}
+@media (max-width: 1439px) {
+  .hide-laptop {
+    display: none !important;
+  }
+}

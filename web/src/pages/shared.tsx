@@ -47,7 +47,7 @@ export function SetupRow({ t }: { t: TokenView }) {
           1h <Pct v={t.change.h1} />
         </div>
       </div>
-      <FlagIcons flags={t.flags} />
+      <FlagIcons flags={t.flags} hideEmpty />
       <button
         className="btn buy xs"
         onClick={(e) => {
