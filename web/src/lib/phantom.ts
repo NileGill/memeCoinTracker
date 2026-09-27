@@ -2,6 +2,7 @@ import { VersionedTransaction } from '@solana/web3.js';
 import type { UltraExecuteResult, UltraOrder } from '../../../shared/types';
 import { setWallet, useStore } from '../store';
 import { api } from './api';
+import { authApi, setLinkedWallet } from './auth';
 
 interface PublicKeyLike {
   toString(): string;
@@ -14,6 +15,7 @@ interface PhantomProvider {
   connect(opts?: { onlyIfTrusted?: boolean }): Promise<{ publicKey: PublicKeyLike }>;
   disconnect(): Promise<void>;
   signTransaction(tx: VersionedTransaction): Promise<VersionedTransaction>;
+  signMessage(message: Uint8Array, display?: 'utf8' | 'hex'): Promise<{ signature: Uint8Array; publicKey: PublicKeyLike }>;
   on(event: 'connect' | 'disconnect' | 'accountChanged', handler: (arg?: unknown) => void): void;
 }
 
@@ -178,4 +180,28 @@ export async function signAndExecute(order: UltraOrder, expect: SwapExpectation)
     throw new Error(errorText(e));
   }
   return api.execute(bytesToB64(signed.serialize()), order.requestId);
+}
+
+// ------------------------------------------------------------------ link wallet to account
+
+/**
+ * Prove this Phantom wallet belongs to the logged-in user: the server issues a one-time message,
+ * Phantom signs it (a plain message, not a transaction: it cannot move funds), the server checks
+ * the signature and saves the public address. No key ever leaves Phantom.
+ */
+export async function linkPhantomWallet(): Promise<string> {
+  let address = useStore.getState().wallet.address;
+  if (!address) address = await connectWallet();
+  const p = getPhantom();
+  if (!p) throw new Error('Phantom is not available.');
+  const { message } = await authApi.walletChallenge();
+  let signature: Uint8Array;
+  try {
+    ({ signature } = await p.signMessage(new TextEncoder().encode(message), 'utf8'));
+  } catch (e) {
+    throw new Error(errorText(e));
+  }
+  const { wallet } = await authApi.linkWallet(address, bytesToB64(signature));
+  setLinkedWallet(wallet);
+  return wallet;
 }

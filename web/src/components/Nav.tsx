@@ -1,7 +1,17 @@
 import { useStore } from '../store';
 import { Icon, type IconName } from './Icon';
 
-export type Route = 'dashboard' | 'setups' | 'market' | 'launches' | 'traders' | 'watchlist' | 'news' | 'portfolio' | 'settings';
+export type Route =
+  | 'dashboard'
+  | 'setups'
+  | 'market'
+  | 'launches'
+  | 'traders'
+  | 'watchlist'
+  | 'news'
+  | 'portfolio'
+  | 'settings'
+  | 'account';
 
 export const ROUTES: { id: Route; label: string; short: string; icon: IconName }[] = [
   { id: 'dashboard', label: 'Dashboard', short: 'Home', icon: 'dashboard' },

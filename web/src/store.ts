@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import type {
+  AccountData,
+  AuthUser,
   HoldingsResponse,
   KolEntry,
   LaunchItem,
@@ -59,15 +61,25 @@ export const DEFAULT_SETTINGS: Settings = {
 
 const SETTINGS_KEY = 'memeradar.settings.v1';
 
+/** Merge stored or synced settings over the defaults, ignoring anything malformed. */
+export function parseSettings(input: unknown): Settings {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return DEFAULT_SETTINGS;
+  const src = input as Record<string, unknown>;
+  const merged: Record<string, unknown> = { ...DEFAULT_SETTINGS };
+  for (const [k, def] of Object.entries(DEFAULT_SETTINGS)) {
+    const v = src[k];
+    if (Array.isArray(def) ? Array.isArray(v) : typeof v === typeof def && (typeof v !== 'number' || Number.isFinite(v))) merged[k] = v;
+  }
+  const out = merged as unknown as Settings;
+  if (out.buyPresets.length !== 5 || out.buyPresets.some((v) => !(typeof v === 'number' && v > 0)))
+    out.buyPresets = DEFAULT_SETTINGS.buyPresets;
+  return out;
+}
+
 function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (!raw) return DEFAULT_SETTINGS;
-    const parsed = JSON.parse(raw) as Partial<Settings>;
-    const merged = { ...DEFAULT_SETTINGS, ...parsed };
-    if (!Array.isArray(merged.buyPresets) || merged.buyPresets.length !== 5 || merged.buyPresets.some((v) => !(v > 0)))
-      merged.buyPresets = DEFAULT_SETTINGS.buyPresets;
-    return merged;
+    return raw ? parseSettings(JSON.parse(raw)) : DEFAULT_SETTINGS;
   } catch {
     return DEFAULT_SETTINGS;
   }
@@ -95,6 +107,11 @@ export interface ExecutedSwap {
   symbol: string;
   inAmount: number;
   outAmount: number;
+}
+
+export interface AuthState {
+  status: 'loading' | 'disabled' | 'guest' | 'user';
+  user: AuthUser | null;
 }
 
 interface WalletState {
@@ -135,6 +152,8 @@ export interface AppState {
   settings: Settings;
   wallet: WalletState;
   swaps: ExecutedSwap[];
+  auth: AuthState;
+  authModal: null | 'login' | 'signup';
 }
 
 const WATCH_KEY = 'memeradar.watchlist.v1';
@@ -206,6 +225,8 @@ export const useStore = create<AppState>(() => ({
   settings: loadSettings(),
   wallet: { available: false, address: null, connecting: false, holdings: null, holdingsError: null },
   swaps: loadSwaps(),
+  auth: { status: 'loading', user: null },
+  authModal: null,
 }));
 
 const set = useStore.setState;
@@ -295,13 +316,67 @@ export function myTraders(): MyTrader[] {
   return loadJson(MY_TRADERS_KEY, isMyTraders, []);
 }
 
+/** Called whenever the saved trader list changes (account sync listens). */
+export const myTradersListeners = new Set<() => void>();
+
 export function rememberTrader(address: string, label: string) {
   const list = myTraders().filter((t) => t.address !== address);
   saveJson(MY_TRADERS_KEY, [...list, { address, label }].slice(-40));
+  myTradersListeners.forEach((fn) => fn());
 }
 
 export function forgetTrader(address: string) {
   saveJson(MY_TRADERS_KEY, myTraders().filter((t) => t.address !== address));
+  myTradersListeners.forEach((fn) => fn());
+}
+
+// ------------------------------------------------------------------ account data (synced when logged in)
+
+export function collectAccountData(): Required<AccountData> {
+  const s = get();
+  return { settings: { ...s.settings }, watchlist: s.watchlist, myTraders: myTraders(), swaps: s.swaps };
+}
+
+/**
+ * Combine what's saved on the account with what's in this browser: the account's settings win
+ * (they're the user's choices), lists are merged so nothing is lost.
+ */
+export function adoptAccountData(d: AccountData) {
+  const s = get();
+  const settings = d.settings ? parseSettings(d.settings) : s.settings;
+  const watchlist = [...new Set([...(d.watchlist ?? []).filter((m) => BASE58.test(m)), ...s.watchlist])].slice(0, 100);
+  const traderMap = new Map<string, MyTrader>();
+  for (const t of [...myTraders(), ...(d.myTraders ?? [])]) if (BASE58.test(t.address)) traderMap.set(t.address, t);
+  const bySig = new Map<string, ExecutedSwap>();
+  for (const sw of [...s.swaps, ...(d.swaps ?? [])]) bySig.set(sw.signature, sw);
+  const swaps = [...bySig.values()].sort((a, b) => b.time - a.time).slice(0, 100);
+  set({ settings, watchlist, swaps });
+  saveJson(SETTINGS_KEY, settings);
+  saveJson(WATCH_KEY, watchlist);
+  saveJson(MY_TRADERS_KEY, [...traderMap.values()].slice(-40));
+  saveJson(SWAPS_KEY, swaps);
+}
+
+// ------------------------------------------------------------------ keep every open tab in sync
+
+// The browser fires "storage" in *other* tabs when one tab saves. Without this, muting
+// (or any setting change) only affected the tab where you clicked.
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e) => {
+    if (!e.newValue) return;
+    try {
+      if (e.key === SETTINGS_KEY) set({ settings: parseSettings(JSON.parse(e.newValue)) });
+      else if (e.key === WATCH_KEY) {
+        const v: unknown = JSON.parse(e.newValue);
+        if (isMintList(v)) set({ watchlist: v.slice(0, 100) });
+      } else if (e.key === SWAPS_KEY) {
+        const v: unknown = JSON.parse(e.newValue);
+        if (Array.isArray(v)) set({ swaps: v.slice(0, 100) as ExecutedSwap[] });
+      }
+    } catch {
+      /* ignore malformed values */
+    }
+  });
 }
 
 // ------------------------------------------------------------------ actions
@@ -309,11 +384,7 @@ export function forgetTrader(address: string) {
 export function updateSettings(patch: Partial<Settings>) {
   const settings = { ...get().settings, ...patch };
   set({ settings });
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  } catch {
-    /* storage unavailable: settings last for this session only */
-  }
+  saveJson(SETTINGS_KEY, settings);
 }
 
 export function openToken(mint: string, side: 'buy' | 'sell' = 'buy') {
@@ -327,11 +398,7 @@ export function closeToken() {
 export function recordSwap(s: ExecutedSwap) {
   const swaps = [s, ...get().swaps].slice(0, 100);
   set({ swaps });
-  try {
-    localStorage.setItem(SWAPS_KEY, JSON.stringify(swaps));
-  } catch {
-    /* ignore */
-  }
+  saveJson(SWAPS_KEY, swaps);
 }
 
 export function setWallet(patch: Partial<WalletState>) {

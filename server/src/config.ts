@@ -32,6 +32,21 @@ export const config = {
 
   userAgent:
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36',
+
+  /** Running on a real host (Render sets RENDER=true). Enables stricter behaviour. */
+  isHosted: process.env.RENDER === 'true' || process.env.NODE_ENV === 'production',
+
+  // Accounts are enabled when a database is configured.
+  databaseUrl: env('DATABASE_URL'),
+
+  // Outgoing email for verification codes (any SMTP provider; Gmail works with an app password).
+  smtp: {
+    host: env('SMTP_HOST') ?? 'smtp.gmail.com',
+    port: Number(env('SMTP_PORT') ?? 465),
+    user: env('SMTP_USER'),
+    pass: env('SMTP_PASS')?.replace(/\s+/g, ''), // Gmail shows app passwords with spaces
+    from: env('MAIL_FROM'),
+  },
 };
 
 export const SOL_MINT = 'So11111111111111111111111111111111111111112';

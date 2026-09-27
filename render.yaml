@@ -15,6 +15,10 @@ services:
         value: "22"
       - key: HOST
         value: 0.0.0.0
-      # Optional, add in the Render dashboard (Environment tab) if you want them:
+      # Add these in the Render dashboard (Environment tab). They are secrets, so never put them in this file.
+      #   DATABASE_URL     Postgres connection string (Neon): turns on accounts, together with email
+      #   SMTP_USER        email address that sends verification codes (e.g. your Gmail)
+      #   SMTP_PASS        its app password (Gmail: myaccount.google.com/apppasswords)
+      # Optional:
       #   SOLANA_RPC_URL   a private RPC such as Helius (faster, more reliable trader tracking)
       #   JUPITER_API_KEY  from https://portal.jup.ag (higher Jupiter rate limits)

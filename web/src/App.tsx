@@ -1,11 +1,14 @@
 import { useEffect, useState, type ComponentType } from 'react';
+import { AuthModal } from './components/AuthModal';
 import { Header } from './components/Header';
 import { Nav, ROUTES, type Route } from './components/Nav';
 import { Toasts } from './components/Toasts';
 import { TokenDrawer } from './components/TokenDrawer';
+import { initAuth } from './lib/auth';
 import { initWallet } from './lib/phantom';
 import { startStream } from './lib/stream';
 import { closeToken } from './store';
+import { Account } from './pages/Account';
 import { Dashboard } from './pages/Dashboard';
 import { Launches } from './pages/Launches';
 import { Market } from './pages/Market';
@@ -18,6 +21,7 @@ import { Watchlist } from './pages/Watchlist';
 
 function routeFromHash(): Route {
   const id = window.location.hash.replace(/^#\/?/, '').split(/[/?]/)[0];
+  if (id === 'account') return 'account';
   return (ROUTES.find((r) => r.id === id)?.id ?? 'dashboard') as Route;
 }
 
@@ -31,6 +35,7 @@ const PAGES: Record<Route, ComponentType> = {
   news: News,
   portfolio: Portfolio,
   settings: Settings,
+  account: Account,
 };
 
 export function App() {
@@ -39,6 +44,7 @@ export function App() {
   useEffect(() => {
     startStream();
     initWallet();
+    void initAuth();
     const onHash = () => {
       setRoute(routeFromHash());
       closeToken();
@@ -57,6 +63,7 @@ export function App() {
         <Page />
       </main>
       <TokenDrawer />
+      <AuthModal />
       <Toasts />
     </div>
   );

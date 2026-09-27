@@ -266,3 +266,37 @@ export interface TokenDetail {
   };
   watchedTraderTrades: TraderTrade[];
 }
+
+// ---- Accounts
+
+export interface AuthUser {
+  email: string;
+  createdAt: number;
+  /** Public address of a wallet the user proved they own (never a key). */
+  wallet: string | null;
+}
+
+export interface SavedSwap {
+  signature: string;
+  time: number;
+  side: 'buy' | 'sell';
+  mint: string;
+  symbol: string;
+  inAmount: number;
+  outAmount: number;
+}
+
+/** Everything synced to an account. */
+export interface AccountData {
+  settings?: Record<string, unknown>;
+  watchlist?: string[];
+  myTraders?: { address: string; label: string }[];
+  swaps?: SavedSwap[];
+}
+
+export interface MeResponse {
+  enabled: boolean;
+  user: AuthUser | null;
+  data?: AccountData;
+  error?: string;
+}

@@ -1,18 +1,49 @@
+import { useCallback, useEffect, useState } from 'react';
+import type { HoldingsResponse } from '../../../shared/types';
 import { Icon } from '../components/Icon';
 import { Empty, Pct, TokenIcon, useTick } from '../components/common';
+import { api } from '../lib/api';
 import { fmtAgo, fmtNum, fmtPrice, fmtSol, fmtUsd, shortAddr } from '../lib/format';
 import { connectWallet, PHANTOM_DOWNLOAD, refreshHoldings } from '../lib/phantom';
 import { openToken, useStore } from '../store';
 import { PageTitle } from './shared';
+
+/** Balances of the wallet linked to the account, shown read-only until Phantom is connected. */
+function useLinkedHoldings(address: string | null) {
+  const [holdings, setHoldings] = useState<HoldingsResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    if (!address) return;
+    try {
+      setHoldings(await api.holdings(address));
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, [address]);
+  useEffect(() => {
+    setHoldings(null);
+    if (!address) return;
+    void load();
+    const id = setInterval(() => !document.hidden && void load(), 30_000);
+    return () => clearInterval(id);
+  }, [address, load]);
+  return { holdings, error, reload: load };
+}
 
 export function Portfolio() {
   useTick(10_000);
   const wallet = useStore((s) => s.wallet);
   const tokens = useStore((s) => s.tokens);
   const swaps = useStore((s) => s.swaps);
-  const h = wallet.holdings;
+  const linkedWallet = useStore((s) => s.auth.user?.wallet ?? null);
+  const readOnly = !wallet.address && Boolean(linkedWallet);
+  const linked = useLinkedHoldings(readOnly ? linkedWallet : null);
+  const h = readOnly ? linked.holdings : wallet.holdings;
+  const viewAddress = wallet.address ?? (readOnly ? linkedWallet : null);
+  const holdingsError = readOnly ? linked.error : wallet.holdingsError;
 
-  if (!wallet.address) {
+  if (!viewAddress) {
     return (
       <>
         <PageTitle title="Portfolio" sub="Your Phantom wallet's balances and one-click selling." />
@@ -42,11 +73,24 @@ export function Portfolio() {
 
   return (
     <>
-      <PageTitle title="Portfolio" sub={`Wallet ${shortAddr(wallet.address, 6)}`}>
-        <button className="btn sm" onClick={() => void refreshHoldings()}>
+      <PageTitle title="Portfolio" sub={`Wallet ${shortAddr(viewAddress, 6)}${readOnly ? ' (linked to your account)' : ''}`}>
+        <button className="btn sm" onClick={() => void (readOnly ? linked.reload() : refreshHoldings())}>
           <Icon name="refresh" size={14} /> Refresh
         </button>
       </PageTitle>
+
+      {readOnly && (
+        <div className="notice blue row" style={{ marginBottom: 12, flexWrap: 'wrap' }}>
+          <span style={{ flex: 1, minWidth: 200 }}>
+            Showing the wallet linked to your account (view only). Connect Phantom to buy or sell.
+          </span>
+          {wallet.available && (
+            <button className="btn primary sm" onClick={() => connectWallet().catch(() => undefined)} disabled={wallet.connecting}>
+              {wallet.connecting ? 'Connecting…' : 'Connect Phantom'}
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="kpis" style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}>
         <div className="kpi">
@@ -66,7 +110,7 @@ export function Portfolio() {
         </div>
       </div>
 
-      {wallet.holdingsError && <div className="notice red" style={{ marginBottom: 12 }}>Couldn't load balances: {wallet.holdingsError}</div>}
+      {holdingsError && <div className="notice red" style={{ marginBottom: 12 }}>Couldn't load balances: {holdingsError}</div>}
 
       <div className="panel" style={{ marginBottom: 14 }}>
         <div className="panel-head">

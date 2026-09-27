@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { ALERT_ICONS, beep, updateTitle } from '../lib/alerts';
 import { api, BASE58, type SearchResult } from '../lib/api';
-import { fmtAgo, fmtPrice, fmtSol, fmtUsd, shortAddr } from '../lib/format';
+import { authApi, signedOut } from '../lib/auth';
+import { fmtAgo, fmtPrice, fmtSol, fmtUsd, hashColor, shortAddr } from '../lib/format';
 import { connectWallet, disconnectWallet, PHANTOM_DOWNLOAD, phantomAppLink } from '../lib/phantom';
 import { clearAlerts, markAlertsRead, openToken, updateSettings, useStore, type AlertItem } from '../store';
 import { Icon } from './Icon';
@@ -204,6 +205,54 @@ function Alerts() {
   );
 }
 
+/** "Log in" when logged out; your initial with an account menu when logged in. */
+function AccountButton() {
+  const auth = useStore((s) => s.auth);
+  const [open, setOpen] = useState(false);
+  const ref = useOutsideClose(open, () => setOpen(false));
+
+  if (auth.status === 'guest')
+    return (
+      <button className="btn sm" onClick={() => useStore.setState({ authModal: 'login' })}>
+        <Icon name="user" size={14} /> <span className="hide-xs">Log in</span>
+      </button>
+    );
+  if (auth.status !== 'user' || !auth.user) return null;
+
+  const email = auth.user.email;
+  return (
+    <div style={{ position: 'relative' }} ref={ref}>
+      <button className="user-chip" style={{ background: hashColor(email) }} title={email} onClick={() => setOpen((o) => !o)}>
+        {email[0]?.toUpperCase()}
+      </button>
+      {open && (
+        <div className="menu">
+          <div className="menu-head">
+            <div className="muted" style={{ fontSize: 12 }}>
+              Logged in as
+            </div>
+            <div className="truncate" style={{ fontWeight: 650 }}>
+              {email}
+            </div>
+          </div>
+          <a href="#/account" onClick={() => setOpen(false)}>
+            <Icon name="user" size={15} /> Account & security
+          </a>
+          <button
+            onClick={async () => {
+              setOpen(false);
+              await authApi.logout().catch(() => undefined);
+              signedOut();
+            }}
+          >
+            <Icon name="logout" size={15} /> Log out
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Mute / unmute alert sounds. Same setting as the Sound toggle in Settings. */
 function SoundButton() {
   const sound = useStore((s) => s.settings.sound);
@@ -342,6 +391,7 @@ export function Header() {
       </span>
       <SoundButton />
       <Alerts />
+      <AccountButton />
       <WalletButton />
     </header>
   );

@@ -3,6 +3,7 @@ import path from 'node:path';
 import compression from 'compression';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Holding, HoldingsResponse, Snapshot, TokenDetail } from '../../shared/types';
+import { authRouter, startAuth } from './auth/routes';
 import { config, SOL_MINT } from './config';
 import {
   ensureToken,
@@ -34,8 +35,14 @@ import { newsList, onNews, startNews } from './sources/news';
 import { rugcheckSummary } from './sources/rugcheck';
 
 const indexHtml = path.join(config.webDist, 'index.html');
-/** e.g. "index-QxZedPTv.js": changes on every web build. */
-const webVersion = existsSync(indexHtml) ? (/assets\/(index-[\w-]+\.js)/.exec(readFileSync(indexHtml, 'utf8'))?.[1] ?? null) : null;
+/** The built bundle's name, e.g. "index-QxZedPTv.js": changes on every web build. Read fresh each time. */
+function webVersion(): string | null {
+  try {
+    return /assets\/(index-[\w-]+\.js)/.exec(readFileSync(indexHtml, 'utf8'))?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
 
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const isAddress = (v: unknown): v is string => typeof v === 'string' && BASE58.test(v);
@@ -43,7 +50,7 @@ const isAddress = (v: unknown): v is string => typeof v === 'string' && BASE58.t
 function snapshot(): Snapshot {
   const lb = leaderboardState();
   return {
-    version: webVersion,
+    version: webVersion(),
     market: marketPayload(),
     launches: launchList(),
     migrations: migrationList(),
@@ -60,6 +67,20 @@ const app = express();
 app.disable('x-powered-by');
 // Behind a hosting proxy, the visitor's IP is in X-Forwarded-For.
 app.set('trust proxy', 1);
+
+// Basic hardening for every response. frame-ancestors stops other sites from embedding
+// MemeRadar in an invisible frame to trick clicks (clickjacking) on login or trade buttons.
+app.use((req, res, next) => {
+  res.set({
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': "frame-ancestors 'none'",
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  });
+  if (req.secure) res.set('Strict-Transport-Security', 'max-age=15552000');
+  next();
+});
 // Gzip everything, including the live stream (bus.ts flushes after each event).
 app.use(compression());
 app.use(express.json({ limit: '256kb' }));
@@ -260,6 +281,10 @@ app.post('/api/swap/execute', async (req, res) => {
   res.status(r.status).json(r.data);
 });
 
+// ---------------------------------------------------------------- accounts
+
+app.use('/api', authRouter());
+
 app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
@@ -294,6 +319,7 @@ onMigration((item) => broadcast('event', { type: 'migration', item }));
 startMarket();
 startTraders();
 startNews();
+void startAuth();
 
 setInterval(() => broadcast('status', allStatus()), 10_000).unref();
 

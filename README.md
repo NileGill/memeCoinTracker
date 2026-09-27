@@ -70,6 +70,23 @@ Connect Phantom with the button in the top right. Buying and selling uses [Jupit
 
 Memecoins are extremely risky. Most go to zero, and on-chain trades are final.
 
+## Accounts
+
+With accounts on, people can sign up with an email and password and verify their email with a 6-digit code. Their settings, watchlist, saved traders, trade history and linked Phantom wallet then follow them to any device.
+
+How logins are kept safe:
+
+- **Passwords** are stored only as scrypt hashes (salted, deliberately slow), never in plain text. Minimum 10 characters, and common passwords are rejected.
+- **Sessions** use a random 256-bit token in an `HttpOnly`, `SameSite=Lax` cookie (`Secure` on HTTPS) that page scripts can't read. The database stores only its SHA-256, and sessions expire after 30 days idle.
+- **Email codes** expire after 10 minutes, allow 5 tries, and are limited to 5 per hour.
+- **Brute force:** 5 wrong passwords lock the account for 15 minutes, and every auth endpoint has a per-IP rate limit.
+- **No account discovery:** signup and "forgot password" answer the same way whether or not an email is registered, and failed logins take the same time.
+- **Account changes:** resetting a password signs out every device; changing it signs out all other devices.
+- **Cross-site requests** are blocked (same-origin JSON only), and the site can't be framed by other sites.
+- **Wallets** are linked by signing a one-time message in Phantom, which proves ownership and can't move funds. Only the public address is stored. The site never asks for a seed phrase or private key.
+
+Accounts turn on when `DATABASE_URL` and email (`SMTP_USER` / `SMTP_PASS`) are set. Without them the site works normally, just without logins. In local development, codes are printed to the server console instead of emailed.
+
 ## Optional settings (`.env`)
 
 Copy `.env.example` to `.env` to change:
