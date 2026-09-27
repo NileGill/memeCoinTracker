@@ -1,4 +1,5 @@
-import { VersionedTransaction } from '@solana/web3.js';
+// The Solana library is large, so it's only downloaded when you actually trade.
+import type { VersionedTransaction } from '@solana/web3.js';
 import type { UltraExecuteResult, UltraOrder } from '../../../shared/types';
 import { setWallet, useStore } from '../store';
 import { api } from './api';
@@ -168,6 +169,7 @@ export async function signAndExecute(order: UltraOrder, expect: SwapExpectation)
   if (order.inputMint !== expect.inputMint || order.outputMint !== expect.outputMint || order.inAmount !== expect.amount)
     throw new Error('The quote does not match the trade you entered. Nothing was signed.');
 
+  const { VersionedTransaction } = await import('@solana/web3.js');
   const tx = VersionedTransaction.deserialize(b64ToBytes(order.transaction));
   const signers = tx.message.staticAccountKeys.slice(0, tx.message.header.numRequiredSignatures).map((k) => k.toBase58());
   if (!signers.includes(expect.taker))

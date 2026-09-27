@@ -1,5 +1,6 @@
 import nodemailer, { type Transporter } from 'nodemailer';
 import { config } from '../config';
+import { markError, markOk, registerSource } from '../lib/status';
 
 const { smtp } = config;
 
@@ -16,6 +17,9 @@ const transport: Transporter | null =
 
 /** Email works on this server (or we're in local development, where codes go to the console). */
 export const emailReady = Boolean(transport) || !config.isHosted;
+
+// Shows on the Settings page (Data sources) whether the last code email was accepted for delivery.
+if (transport) registerSource('email', 'Account emails');
 
 export class EmailError extends Error {}
 
@@ -63,14 +67,18 @@ export async function sendAuthEmail(to: string, purpose: Purpose, code = '') {
          </div>`;
 
   try {
-    await transport.sendMail({
+    const info = await transport.sendMail({
       from: smtp.from ?? `MemeRadar <${smtp.user}>`,
       to,
       subject: copy.subject(code),
       text,
       html,
     });
+    if (!info.accepted?.length) throw new Error(`rejected by the mail server: ${String(info.response ?? '').slice(0, 120)}`);
+    markOk('email');
+    console.log(`[mail] ${purpose} email accepted (${String(info.response ?? '').slice(0, 60)})`);
   } catch (e) {
+    markError('email', e);
     console.error('[mail] send failed:', e instanceof Error ? e.message : e);
     throw new EmailError("We couldn't send the email right now. Try again in a minute.");
   }

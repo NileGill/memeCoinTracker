@@ -29,7 +29,8 @@ import {
 import { addClient, broadcast, canAcceptClient, clientCount, send } from './lib/bus';
 import { errMessage } from './lib/http';
 import { allStatus } from './lib/status';
-import { saveNow, state } from './lib/store';
+import { persistAll, restoreAll } from './lib/cache';
+import { restoreState, saveNow, state } from './lib/store';
 import { jupSearch, jupShield, jupTokens, ultraExecute, ultraHoldings, ultraOrder } from './sources/jupiter';
 import { newsList, onNews, startNews } from './sources/news';
 import { rugcheckSummary } from './sources/rugcheck';
@@ -316,16 +317,15 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 
 onNews((items) => broadcast('news', items));
 onMigration((item) => broadcast('event', { type: 'migration', item }));
-startMarket();
-startTraders();
-startNews();
-void startAuth();
 
 setInterval(() => broadcast('status', allStatus()), 10_000).unref();
 
+// Listen first so the host sees a healthy service right away, then restore and start polling.
 const server = app.listen(config.port, config.host, () => {
   const host = config.host === '0.0.0.0' ? 'localhost' : config.host;
-  console.log(`\n  MemeRadar is live at http://${host}:${config.port}\n`);
+  console.log(`
+  MemeRadar is live at http://${host}:${config.port}
+`);
 });
 server.on('error', (e: NodeJS.ErrnoException) => {
   if (e.code === 'EADDRINUSE') {
@@ -335,10 +335,34 @@ server.on('error', (e: NodeJS.ErrnoException) => {
   throw e;
 });
 
-const shutdown = () => {
+async function boot() {
+  // Bring back the trader list and the last live data so the site is full immediately after a restart.
+  await restoreState();
+  await restoreAll();
+  startMarket();
+  startTraders();
+  startNews();
+  void startAuth();
+}
+void boot();
+
+// Free hosting puts the server to sleep after 15 idle minutes, which made the next visit wait
+// about a minute. A request to our own public address every 10 minutes keeps it awake.
+const publicUrl = process.env.RENDER_EXTERNAL_URL;
+if (publicUrl) {
+  setInterval(() => {
+    fetch(`${publicUrl}/api/health`, { signal: AbortSignal.timeout(20_000) }).catch(() => undefined);
+  }, 10 * 60_000).unref();
+}
+
+let shuttingDown = false;
+const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
   saveNow();
+  await persistAll(); // warm-restart cache, written once per shutdown
   server.close();
   process.exit(0);
 };
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => void shutdown());
+process.on('SIGTERM', () => void shutdown());

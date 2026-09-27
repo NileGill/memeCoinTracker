@@ -1,6 +1,7 @@
 import type { KolEntry, ServerEvent, TraderTrade, TraderView } from '../../../shared/types';
 import { config } from '../config';
 import { broadcast } from '../lib/bus';
+import { registerPersisted } from '../lib/cache';
 import { errMessage } from '../lib/http';
 import { markError, markOk, registerSource } from '../lib/status';
 import { save, state, type StoredTrader } from '../lib/store';
@@ -100,6 +101,29 @@ export function tradesForMint(mint: string): TraderTrade[] {
 export function leaderboardState() {
   return { leaderboard, leaderboardUpdated };
 }
+
+registerPersisted(
+  'traders',
+  () => ({ leaderboard, leaderboardUpdated, feed }),
+  (value) => {
+    const v = value as { leaderboard?: KolEntry[]; leaderboardUpdated?: number | null; feed?: TraderTrade[] };
+    if (Array.isArray(v.leaderboard) && v.leaderboard.length) {
+      leaderboard = v.leaderboard;
+      leaderboardUpdated = v.leaderboardUpdated ?? null;
+    }
+    if (Array.isArray(v.feed)) {
+      feed = v.feed.slice(0, 500);
+      // Rebuild each trader's recent trades so today's stats and "last trade" survive restarts.
+      for (const t of [...feed].reverse()) {
+        const r = rt(t.trader);
+        r.trades.unshift(t);
+        r.trades.length = Math.min(r.trades.length, 100);
+        r.lastTradeAt = Math.max(r.lastTradeAt ?? 0, t.time);
+        seenSigs.add(t.id);
+      }
+    }
+  },
+);
 
 let tradersTimer: NodeJS.Timeout | null = null;
 function scheduleTradersBroadcast() {

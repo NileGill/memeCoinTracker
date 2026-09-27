@@ -616,7 +616,8 @@ export async function startAuth() {
     }
   }
   console.log(`[auth] accounts enabled${config.smtp.user ? '' : ' (dev mode: emails are printed to this console)'}`);
-  setInterval(() => void cleanup().catch((e) => console.error('[auth] cleanup', e)), 3_600_000).unref();
+  // Twice a day is plenty, and lets the free database sleep in between.
+  setInterval(() => void cleanup().catch((e) => console.error('[auth] cleanup', e)), 12 * 3_600_000).unref();
   setInterval(() => {
     const cutoff = Date.now() - 30 * 60_000;
     for (const [email, at] of noticeSent) if (at < cutoff) noticeSent.delete(email);

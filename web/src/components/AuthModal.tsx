@@ -102,7 +102,9 @@ export function AuthModal() {
     setStep(purpose === 'verify' ? 'verify' : 'reset');
     setCode('');
     setCooldown(60);
-    setInfo(`We sent a 6-digit code to ${email.trim()}. It expires in 10 minutes. Check your spam folder too.`);
+    setInfo(
+      `We sent a 6-digit code to ${email.trim()}. It expires in 10 minutes. Not in your inbox? Check Spam, and if this is the same Gmail that sends MemeRadar's codes, look in Sent or All Mail.`,
+    );
   };
 
   const submit = (e: FormEvent) => {

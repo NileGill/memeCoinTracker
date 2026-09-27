@@ -8,6 +8,7 @@ import type {
 } from '../../../shared/types';
 import { NON_MEME_MINTS, NON_MEME_TAGS, SOL_MINT } from '../config';
 import { broadcast } from '../lib/bus';
+import { registerPersisted } from '../lib/cache';
 import { num } from '../lib/http';
 import { markError, markOk, registerSource } from '../lib/status';
 import {
@@ -579,16 +580,17 @@ export function startMarket() {
     },
   });
 
+  // Everything starts within ~3 seconds; the limiters keep request rates safe.
+  every(6_000, 'dexscreener', refreshDex, 300);
   every(20_000, 'jupiter', pollSolPrice, 0);
-  every(30_000, 'jupiter', () => pollJupList('toptrending', '5m', 'trending'), 500);
-  every(45_000, 'jupiter', () => pollJupList('toptraded', '5m', 'traded'), 2_000);
-  every(90_000, 'jupiter', () => pollJupList('toporganicscore', '1h', 'organic'), 4_000);
-  every(20_000, 'jupiter', pollRecent, 3_000);
-  every(15_000, 'jupiter', enrichLaunches, 12_000);
-  every(15_000, 'jupiter', refreshJupiter, 8_000);
-  every(40_000, 'dexlists', pollDexLists, 1_000);
-  every(60_000, 'gecko', pollGecko, 1_500);
-  every(6_000, 'dexscreener', refreshDex, 6_000);
+  every(30_000, 'jupiter', () => pollJupList('toptrending', '5m', 'trending'), 0);
+  every(40_000, 'dexlists', pollDexLists, 0);
+  every(60_000, 'gecko', pollGecko, 0);
+  every(15_000, 'jupiter', refreshJupiter, 1_500);
+  every(20_000, 'jupiter', pollRecent, 2_000);
+  every(45_000, 'jupiter', () => pollJupList('toptraded', '5m', 'traded'), 2_500);
+  every(15_000, 'jupiter', enrichLaunches, 3_000);
+  every(90_000, 'jupiter', () => pollJupList('toporganicscore', '1h', 'organic'), 3_500);
   setInterval(prune, 60_000).unref();
 }
 
@@ -626,3 +628,73 @@ export function keepWatching(mints: string[]) {
   for (const m of mints) touch(m, 'watch');
   scheduleMarketBroadcast();
 }
+
+// ---------------------------------------------------------------- warm restarts
+
+interface SavedEntry {
+  mint: string;
+  jup: JupToken | null;
+  jupAt: number;
+  ds: DsPair | null;
+  dsAt: number;
+  sources: [TokenSource, number][];
+  firstSeen: number;
+  boostAmount: number | null;
+}
+
+interface SavedMarket {
+  entries: SavedEntry[];
+  launches: LaunchItem[];
+  migrations: MigrationItem[];
+  launchTimes: number[];
+  graduationTimes: number[];
+  solPrice: number | null;
+}
+
+registerPersisted(
+  'market',
+  (): SavedMarket => ({
+    entries: [...entries.values()].map((e) => ({
+      mint: e.mint,
+      jup: e.jup,
+      jupAt: e.jupAt,
+      ds: e.ds,
+      dsAt: e.dsAt,
+      sources: [...e.sources.entries()],
+      firstSeen: e.firstSeen,
+      boostAmount: e.boostAmount,
+    })),
+    launches: [...launches.values()],
+    migrations: [...migrations.values()],
+    launchTimes,
+    graduationTimes,
+    solPrice,
+  }),
+  (value) => {
+    const saved = value as Partial<SavedMarket>;
+    for (const s of saved.entries ?? []) {
+      if (!s?.mint || entries.has(s.mint)) continue;
+      entries.set(s.mint, {
+        mint: s.mint,
+        jup: s.jup ?? null,
+        jupAt: s.jupAt ?? 0,
+        jupRetryAt: 0,
+        ds: s.ds ?? null,
+        dsAt: s.dsAt ?? 0,
+        sources: new Map(s.sources ?? []),
+        firstSeen: s.firstSeen ?? Date.now(),
+        boostAmount: s.boostAmount ?? null,
+        view: null,
+      });
+    }
+    for (const l of saved.launches ?? []) if (l?.mint && !launches.has(l.mint)) launches.set(l.mint, l);
+    for (const m of saved.migrations ?? []) if (m?.mint && !migrations.has(m.mint)) migrations.set(m.mint, m);
+    const hourAgo = Date.now() - 3_600_000;
+    launchTimes.push(...(saved.launchTimes ?? []).filter((t) => t > hourAgo));
+    launchTimes.sort((a, b) => a - b);
+    graduationTimes.push(...(saved.graduationTimes ?? []).filter((t) => t > hourAgo));
+    graduationTimes.sort((a, b) => a - b);
+    solPrice ??= saved.solPrice ?? null;
+    rebuildAll();
+  },
+);

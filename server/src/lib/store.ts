@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { config } from '../config';
+import { kvGet, kvSet } from './cache';
 
 export interface StoredTrader {
   address: string;
@@ -42,12 +43,35 @@ export const state: State = load();
 
 let saveTimer: NodeJS.Timeout | null = null;
 
+let dbTimer: NodeJS.Timeout | null = null;
+
 export function save() {
-  if (saveTimer) return;
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    saveNow();
-  }, 250);
+  if (!saveTimer) {
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      saveNow();
+    }, 250);
+  }
+  // Hosting disks are wiped on every deploy, so the trader list also lives in the database.
+  // Written only when it changes, so the free database can stay asleep otherwise.
+  if (!dbTimer) {
+    dbTimer = setTimeout(() => {
+      dbTimer = null;
+      kvSet('state', state).catch((e) => console.warn('[store] database save failed:', e instanceof Error ? e.message : e));
+    }, 2_000);
+  }
+}
+
+/** At startup, prefer the copy in the database (the local file doesn't survive deploys). */
+export async function restoreState() {
+  try {
+    const saved = await kvGet<Partial<State>>('state');
+    if (!saved) return;
+    if (Array.isArray(saved.traders)) state.traders = saved.traders;
+    state.tradersInitialised = Boolean(saved.tradersInitialised);
+  } catch (e) {
+    console.warn('[store] could not load saved traders:', e instanceof Error ? e.message : e);
+  }
 }
 
 export function saveNow() {

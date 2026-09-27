@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import Parser from 'rss-parser';
 import type { NewsItem } from '../../../shared/types';
+import { registerPersisted } from '../lib/cache';
 import { fetchText } from '../lib/http';
 import { markError, markOk, registerSource } from '../lib/status';
 
@@ -87,6 +88,15 @@ export function newsList(): NewsItem[] {
 export function onNews(fn: (items: NewsItem[]) => void) {
   listeners.push(fn);
 }
+
+registerPersisted(
+  'news',
+  () => newsList(),
+  (value) => {
+    if (!Array.isArray(value)) return;
+    for (const n of value as NewsItem[]) if (n?.id && !items.has(n.id)) items.set(n.id, n);
+  },
+);
 
 async function poll(feed: Feed) {
   try {
