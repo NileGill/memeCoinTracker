@@ -86,7 +86,7 @@ The repo includes a [Render](https://render.com) Blueprint (`render.yaml`), so t
 
 1. Sign in at [render.com](https://render.com) with GitHub.
 2. Click **New → Blueprint**, pick the `memeCoinTracker` repo, then **Apply**.
-3. After the first build (~3 minutes) the site is live at `https://memeradar.onrender.com` (or a similar name Render assigns).
+3. After the first build (~3 minutes), your address is shown at the top of the service page in Render. It looks like `https://memeradar-xxxx.onrender.com`. **Use that exact link.** Plain `memeradar.onrender.com` belongs to someone else's unrelated site.
 
 Good to know about the free plan:
 
