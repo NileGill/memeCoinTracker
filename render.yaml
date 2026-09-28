@@ -17,8 +17,9 @@ services:
         value: 0.0.0.0
       # Add these in the Render dashboard (Environment tab). They are secrets, so never put them in this file.
       #   DATABASE_URL     Postgres connection string (Neon): turns on accounts, together with email
-      #   SMTP_USER        email address that sends verification codes (e.g. your Gmail)
-      #   SMTP_PASS        its app password (Gmail: myaccount.google.com/apppasswords)
+      #   BREVO_API_KEY    Brevo API key: sends verification codes over HTTPS (the free plan blocks SMTP)
+      #   MAIL_FROM        the sender address, verified in Brevo (e.g. your Gmail)
+      #   (SMTP_USER / SMTP_PASS also work, but only on a paid plan: Render's free plan blocks SMTP)
       # Optional:
       #   SOLANA_RPC_URL   a private RPC such as Helius (faster, more reliable trader tracking)
       #   JUPITER_API_KEY  from https://portal.jup.ag (higher Jupiter rate limits)

@@ -39,7 +39,10 @@ export const config = {
   // Accounts are enabled when a database is configured.
   databaseUrl: env('DATABASE_URL'),
 
-  // Outgoing email for verification codes (any SMTP provider; Gmail works with an app password).
+  // Outgoing email for verification codes. On free hosting that blocks SMTP (Render), use Brevo's
+  // HTTPS API (BREVO_API_KEY + MAIL_FROM set to a sender verified in Brevo). Otherwise any SMTP server works.
+  brevoKey: env('BREVO_API_KEY'),
+  // Or SMTP (any provider; Gmail works with an app password). Not usable on Render's free plan.
   smtp: {
     host: env('SMTP_HOST') ?? 'smtp.gmail.com',
     port: Number(env('SMTP_PORT') ?? 465),

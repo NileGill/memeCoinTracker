@@ -108,7 +108,7 @@ How logins are kept safe:
 - **Cross-site requests** are blocked (same-origin JSON only), and the site can't be framed by other sites.
 - **Wallets** are linked by signing a one-time message in Phantom, which proves ownership and can't move funds. Only the public address is stored. The site never asks for a seed phrase or private key.
 
-Accounts turn on when `DATABASE_URL` and email (`SMTP_USER` / `SMTP_PASS`) are set. Without them the site works normally, just without logins. In local development, codes are printed to the server console instead of emailed.
+Accounts turn on when `DATABASE_URL` and a way to send email are set: either `BREVO_API_KEY` + `MAIL_FROM` ([Brevo](https://www.brevo.com), free, sends over HTTPS) or `SMTP_USER` / `SMTP_PASS`. **Render's free plan blocks outgoing SMTP**, so on it only Brevo works. Without them the site works normally, just without logins. In local development, codes are printed to the server console instead of emailed.
 
 ## Optional settings (`.env`)
 
