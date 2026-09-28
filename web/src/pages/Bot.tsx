@@ -121,7 +121,7 @@ function ModelResults({ m }: { m: MlModelInfo }) {
         <StrategyLine label="AI model (test period)" r={m.test} />
         {m.baseline && <StrategyLine label={`Plain MemeRadar score ${m.baseline.threshold}+ (same period)`} r={m.baseline} />}
         <div className="dim" style={{ fontSize: 12.5 }}>
-          Ranking skill {m.auc.toFixed(2)} (0.5 is a coin flip) · {pct1(m.baseRate)} of all test snapshots hit the target by chance ·
+          Ranking skill {m.auc.toFixed(2)} (0.5 is a coin flip; it can be high just from spotting which coins will move at all, so the trade results above are what count) · {pct1(m.baseRate)} of all test snapshots hit the target ·
           learned from {m.trainRows.toLocaleString()} snapshots of {m.tokens.toLocaleString()} coins
         </div>
         {m.problems.length > 0 && (

@@ -194,7 +194,8 @@ function interp(xs: number[], ys: number[], x: number): number {
 function readyToTrain(): { ok: boolean; why: string } {
   const r = recorderStatus();
   if (!r.loaded) return { ok: false, why: 'Loading saved data…' };
-  const span = r.dataFrom ? Date.now() - r.dataFrom : 0;
+  // Time covered by snapshots (not wall time: the server may have been down in between).
+  const span = r.dataFrom != null && r.dataTo != null ? r.dataTo - r.dataFrom : 0;
   if (r.samples < ML.minRows)
     return { ok: false, why: `Needs ${ML.minRows.toLocaleString('en-US')} finished snapshots to start learning (has ${r.samples.toLocaleString('en-US')}).` };
   if (span < ML.minSpanMs) {
@@ -215,16 +216,20 @@ async function train() {
   try {
     const n = d.n;
     const order = Int32Array.from({ length: n }, (_, i) => i).sort((a, b) => d.t[a] - d.t[b]);
-    const tAt = (q: number) => d.t[order[Math.min(n - 1, Math.floor(q * n))]];
-    const t70 = tAt(0.7);
-    const t85 = tAt(0.85);
+    // Split by time, not by row count, so each part really covers its share of the history.
+    const tFirst = d.t[order[0]];
+    const tLast = d.t[order[n - 1]];
+    const span = tLast - tFirst;
+    const tuneStart = tLast - 0.3 * span;
+    const testStart = tLast - 0.15 * span;
     // Leave a horizon-long gap between parts so no outcome overlaps the next part's snapshots.
     const part = (lo: number, hi: number) => Int32Array.from(Array.from(order).filter((i) => d.t[i] >= lo && d.t[i] < hi));
-    const trainAll = part(-Infinity, t70 - ML.horizonMs);
-    const tuneAll = part(t70, t85 - ML.horizonMs);
-    const testAll = part(t85, Infinity);
-    if (trainAll.length < 500 && !ML.fast) throw new Note('Not enough older data to learn from yet.');
-    if (!tuneAll.length || !testAll.length) throw new Note('Not enough recent data to test on yet.');
+    const trainAll = part(-Infinity, tuneStart - ML.horizonMs);
+    const tuneAll = part(tuneStart, testStart - ML.horizonMs);
+    const testAll = part(testStart, Infinity);
+    const minPart = ML.fast ? 20 : 100;
+    if (trainAll.length < minPart * 5) throw new Note('Not enough older data to learn from yet.');
+    if (tuneAll.length < minPart || testAll.length < minPart) throw new Note('Not enough recent data to test on yet.');
 
     const minTrades = ML.proven.minTrades;
     const minLeaf = Math.max(10, Math.min(60, Math.floor(trainAll.length / 50)));
@@ -324,7 +329,7 @@ async function train() {
       tokens: mints.size,
       dataFrom: d.t[order[0]],
       dataTo: d.t[order[n - 1]],
-      testFrom: t85,
+      testFrom: testStart,
       testTo: d.t[order[n - 1]],
       auc: round(testAuc, 3),
       baseRate: round(baseRate, 3),

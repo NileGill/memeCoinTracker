@@ -36,13 +36,16 @@ function recordTape(now: number) {
   let up = 0;
   let known = 0;
   for (const info of allEntries()) {
-    total++;
     const v = info.view;
     seen.add(v.mint);
-    if (now - info.freshAt < 120_000) fresh++;
-    if (!info.hidden && v.change.m5 != null) {
-      known++;
-      if (v.change.m5 > 0) up++;
+    // Feed health counts listed coins only: background-followed ones are often dead on purpose.
+    if (!info.hidden) {
+      total++;
+      if (now - info.freshAt < 120_000) fresh++;
+      if (v.change.m5 != null) {
+        known++;
+        if (v.change.m5 > 0) up++;
+      }
     }
     const price = v.priceUsd;
     if (price == null || !(price > 0) || now - info.freshAt > 90_000) continue;
@@ -447,8 +450,12 @@ export async function flushSnapshots() {
 
 export function recorderStatus() {
   let from: number | null = null;
-  for (let i = 0; i < data.n; i++) if (from === null || data.t[i] < from) from = data.t[i];
-  return { samples: data.n + waiting.length, pending: open.length, stored, dataFrom: from, loaded };
+  let to: number | null = null;
+  for (let i = 0; i < data.n; i++) {
+    if (from === null || data.t[i] < from) from = data.t[i];
+    if (to === null || data.t[i] > to) to = data.t[i];
+  }
+  return { samples: data.n + waiting.length, pending: open.length, stored, dataFrom: from, dataTo: to, loaded };
 }
 
 let started = false;
