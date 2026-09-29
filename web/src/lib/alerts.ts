@@ -107,7 +107,7 @@ export function checkMarket(tokens: TokenView[], serverStartedAt: number) {
         mint: t.mint,
         title: `AI pick: ${name}`,
         body:
-          (target ? `${Math.round(t.ai.win * 100)}% of similar setups hit +${target.tp}% before -${target.sl}% in testing` : 'The model rates this a buy') +
+          (target ? `${Math.round(t.ai.win * 100)}% of similar trades made money in testing (target +${target.tp}%, stop -${target.sl}%)` : 'The model rates this a buy') +
           (t.ai.ev != null ? ` · avg ${t.ai.ev > 0 ? '+' : ''}${t.ai.ev}% after fees` : ''),
       });
     }

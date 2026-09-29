@@ -209,7 +209,7 @@ export function AiChip({ t }: { t: TokenView }) {
   return (
     <span
       className={`ai-chip ${pick ? 'pick' : ev != null && ev > 0 ? 'good' : ''}`}
-      title={`In testing, ${Math.round(win * 100)}% of similar setups hit the profit target before the stop${ev != null ? `; they averaged ${fmtPct(ev)} after fees` : ''}.${risk != null ? ` Crash chance (50%+ drop within the hour): ${Math.round(risk * 100)}%.` : ''}${pick ? ' The bot would buy this.' : ''}`}
+      title={`In testing, ${Math.round(win * 100)}% of trades in similar coins made money after fees${ev != null ? `, averaging ${fmtPct(ev)}` : ''}.${risk != null ? ` Crash chance (50%+ drop within the hour): ${Math.round(risk * 100)}%.` : ''}${pick ? ' The bot would buy this.' : ''}`}
     >
       {Math.round(win * 100)}%{ev != null && <small className={pctClass(ev)}>{fmtPct(ev, 1)}</small>}
     </span>

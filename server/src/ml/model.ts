@@ -29,7 +29,7 @@ const FEATURE_LABELS = FEATURES.map((f) => f.label);
 const CRASH_LEVEL = ML.slLevels.length - 1;
 
 interface SavedModel {
-  v: 2;
+  v: 3;
   schema: number;
   featureLabels: string[];
   gbdt: GbdtModel;
@@ -41,8 +41,17 @@ interface SavedModel {
   riskMax: number | null;
   /** The same cap for the score strategy used before the AI is proven (null = no cap). */
   scoreRiskMax: number | null;
-  /** Probability -> observed win rate and average return (from data the model didn't learn on). */
-  calib: { p: number[]; win: number[]; ev: number[] };
+  /**
+   * Probability -> share of trades that made money, and their average return, from data the
+   * model didn't learn on. Separate tables for coins under the crash cap and coins over it.
+   */
+  calib: { safe: Calib; risky: Calib | null };
+}
+
+interface Calib {
+  p: number[];
+  win: number[];
+  ev: number[];
 }
 
 let current: SavedModel | null = null;
@@ -212,7 +221,8 @@ function isotonic(vals: number[], weights: number[]): number[] {
   return blocks.flatMap((b) => Array(b.n).fill(b.v));
 }
 
-function calibrate(prob: number[], outs: Outcome[]) {
+/** Bins by probability: how many trades made money (after fees) and their average return. */
+function calibrate(prob: number[], outs: Outcome[]): Calib {
   const idx = prob.map((_, i) => i).sort((a, b) => prob[a] - prob[b]);
   const size = Math.max(40, Math.floor(idx.length / 10));
   const p: number[] = [];
@@ -227,13 +237,13 @@ function calibrate(prob: number[], outs: Outcome[]) {
       const n1 = part.length;
       const tot = n0 + n1;
       p[p.length - 1] = (p[p.length - 1] * n0 + part.reduce((a, i) => a + prob[i], 0)) / tot;
-      win[win.length - 1] = (win[win.length - 1] * n0 + part.reduce((a, i) => a + outs[i].y, 0)) / tot;
+      win[win.length - 1] = (win[win.length - 1] * n0 + part.reduce((a, i) => a + (outs[i].ret > 0 ? 1 : 0), 0)) / tot;
       ev[ev.length - 1] = (ev[ev.length - 1] * n0 + part.reduce((a, i) => a + outs[i].ret, 0)) / tot;
       w[w.length - 1] = tot;
       continue;
     }
     p.push(part.reduce((a, i) => a + prob[i], 0) / part.length);
-    win.push(part.reduce((a, i) => a + outs[i].y, 0) / part.length);
+    win.push(part.reduce((a, i) => a + (outs[i].ret > 0 ? 1 : 0), 0) / part.length);
     ev.push(part.reduce((a, i) => a + outs[i].ret, 0) / part.length);
     w.push(part.length);
   }
@@ -418,6 +428,14 @@ async function train() {
     const calibRows = [...tuneRows, ...testRows];
     const calibOuts = [...tuneOuts, ...testOuts];
     const calibProb = calibRows.map((i) => predict(best.gbdt, rowX(i)));
+    // Rate coins against similar coins on the same side of the crash cap, so a pick's numbers match the test.
+    const isSafe = (i: number) => rule.risk == null || crashProb[i] <= rule.risk;
+    const split = (safe: boolean) => {
+      const idx = calibRows.map((i, k) => (isSafe(i) === safe ? k : -1)).filter((k) => k >= 0);
+      return { prob: idx.map((k) => calibProb[k]), outs: idx.map((k) => calibOuts[k]) };
+    };
+    const safeSet = split(true);
+    const riskySet = rule.risk == null ? null : split(false);
     const mints = new Set<number>();
     for (let i = 0; i < n; i++) mints.add(d.mint[i]);
 
@@ -443,7 +461,7 @@ async function train() {
       topFeatures,
     };
     current = {
-      v: 2,
+      v: 3,
       schema: ML.schema,
       featureLabels: FEATURE_LABELS,
       gbdt: best.gbdt,
@@ -452,7 +470,10 @@ async function train() {
       threshold: rule.th,
       riskMax: rule.risk,
       scoreRiskMax,
-      calib: calibrate(calibProb, calibOuts),
+      calib: {
+        safe: calibrate(safeSet.prob, safeSet.outs),
+        risky: riskySet && riskySet.prob.length ? calibrate(riskySet.prob, riskySet.outs) : null,
+      },
     };
     lastNote = null;
     console.log(
@@ -483,10 +504,11 @@ class Note extends Error {}
 /** The models' read on a coin right now: win model probability `p`, crash chance `risk`. */
 function signalFor(v: TokenView, p: number, risk: number | null): AiSignal {
   const c = current!;
-  const win = interp(c.calib.p, c.calib.win, p);
-  const ev = interp(c.calib.p, c.calib.ev, p);
   const danger = v.flags.some((f) => f.severity === 'danger');
   const safeEnough = c.riskMax == null || (risk != null && risk <= c.riskMax);
+  const table = safeEnough || !c.calib.risky ? c.calib.safe : c.calib.risky;
+  const win = interp(table.p, table.win, p);
+  const ev = interp(table.p, table.ev, p);
   return {
     win: round(Number.isFinite(win) ? win : p, 2),
     ev: Number.isFinite(ev) ? round(ev, 1) : null,
@@ -588,7 +610,7 @@ export async function startModel() {
   try {
     const saved = await kvGet<SavedModel>(ML.modelKey);
     if (
-      saved?.v === 2 &&
+      saved?.v === 3 &&
       saved.schema === ML.schema &&
       JSON.stringify(saved.featureLabels) === JSON.stringify(FEATURE_LABELS) &&
       saved.gbdt?.trees?.length

@@ -40,8 +40,8 @@ function AiPanel({ t, drivers }: { t: TokenView; drivers: AiDriver[] | null | un
       </div>
       <div className="panel-body col" style={{ gap: 10 }}>
         <div style={{ fontSize: 13.5 }}>
-          <b>{Math.round(win * 100)}%</b> of similar setups hit <span className="up">+{model.target.tp}%</span> before{' '}
-          <span className="down">−{model.target.sl}%</span> within {model.target.holdMin} minutes in testing
+          <b>{Math.round(win * 100)}%</b> of trades in similar coins made money in testing (sell at <span className="up">+{model.target.tp}%</span>, stop at{' '}
+          <span className="down">−{model.target.sl}%</span>, or after {model.target.holdMin} minutes)
           {ev != null && (
             <>
               , averaging <span className={pctClass(ev)}>{fmtPct(ev)}</span> after fees

@@ -89,7 +89,7 @@ export interface AiTarget {
 }
 
 export interface AiSignal {
-  /** How often coins rated like this hit the take-profit before the stop-loss in testing, 0-1. */
+  /** How often trades in coins rated like this made money after fees in testing, 0-1. */
   win: number;
   /** Average result of those test trades after fees, in % (null when too few to say). */
   ev: number | null;

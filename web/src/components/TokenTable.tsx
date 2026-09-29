@@ -51,7 +51,7 @@ const COLS: Record<Col, ColDef> = {
     cls: 'c',
     sort: (t) => (t.ai ? t.ai.win + (t.ai.pick ? 1 : 0) : null),
     render: (t) => (t.ai ? <AiChip t={t} /> : <span className="dim">—</span>),
-    title: 'AI model: how often similar setups hit its profit target before its stop in testing (and their average result after fees)',
+    title: 'AI model: how often trades in similar coins made money in testing (and their average result after fees)',
   },
   price: { label: 'Price', sort: (t) => t.priceUsd, render: (t) => <span className="num">{fmtPrice(t.priceUsd)}</span> },
   m5: { label: '5m', sort: (t) => t.change.m5, render: (t) => <Pct v={t.change.m5} /> },
