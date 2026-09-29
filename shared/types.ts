@@ -205,6 +205,11 @@ export interface PaperPosition {
   /** Pool liquidity (USD) when bought, and the latest reading. */
   entryLiquidity?: number;
   lastLiquidity?: number;
+  /** The price reading at which the target was seen; the sale fills at the next reading. */
+  tpSeenAt?: number;
+  /** Buy placed but not filled yet: it fills at the next fresh price reading after `entrySeenAt`. */
+  pending?: boolean;
+  entrySeenAt?: number;
 }
 
 export type PaperExit = 'tp' | 'sl' | 'time' | 'manual' | 'gone' | 'reset';

@@ -410,6 +410,19 @@ function PositionRow({ p }: { p: PaperPosition }) {
   const usd = p.qty * Math.min(price, p.entryPrice * (1 + p.target.tp / 100));
   const value = solPrice && side > 0 ? ((usd * side) / (side + usd)) * 0.99 / solPrice : null;
   const left = Math.max(0, p.closeBy - Date.now());
+  if (p.pending)
+    return (
+      <div className="feed-item" onClick={() => openToken(p.mint)}>
+        <TokenIcon src={p.icon} symbol={p.symbol} />
+        <div className="main-col">
+          <div className="title">
+            <span className="truncate">{p.symbol}</span>
+            <span className="badge">buying…</span>
+          </div>
+          <div className="meta truncate">{fmtSol(p.costSol)} order placed · fills at the next price update</div>
+        </div>
+      </div>
+    );
   return (
     <div className="feed-item" onClick={() => openToken(p.mint)}>
       <TokenIcon src={p.icon} symbol={p.symbol} />

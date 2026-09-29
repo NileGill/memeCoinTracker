@@ -126,13 +126,15 @@ interface Live {
   /** Conservative pool liquidity, USD. */
   liquidity: number | null;
   liquidityConflict: boolean;
+  /** When this price reading arrived from the data feed. */
+  freshAt: number;
 }
 
 function live(mint: string, now: number): Live | null {
   const info = entryInfo(mint);
   const price = info?.view.priceUsd;
   if (!info || price == null || !(price > 0) || now - info.freshAt > 120_000) return null;
-  return { price, view: info.view, liquidity: info.liquidityLow, liquidityConflict: info.liquidityConflict };
+  return { price, view: info.view, liquidity: info.liquidityLow, liquidityConflict: info.liquidityConflict, freshAt: info.freshAt };
 }
 
 /** Take-profits fill at the target price, never above it (a momentary spike isn't a fill). */
@@ -146,6 +148,7 @@ function saleProceeds(p: PaperPosition, price: number, liquidity: number | null 
 }
 
 function positionValue(p: PaperPosition, sol: number, now: number): number {
+  if (p.pending) return p.costSol; // the SOL is set aside until the buy fills
   const l = live(p.mint, now);
   const price = Math.min(l?.price ?? p.lastPrice, tpPrice(p));
   return saleProceeds(p, price, l?.liquidity ?? p.lastLiquidity ?? p.entryLiquidity, sol).proceeds;
@@ -188,22 +191,21 @@ function tradeSize(a: Account, liquidity: number, sol: number, now: number): num
   return size >= 0.01 ? size : 0;
 }
 
-function open(a: Account, l: Live, size: number, strategy: PaperStrategy, target: AiTarget, sol: number, now: number) {
+/**
+ * Place a buy. Like a real order, it lands a moment later: it fills at the next fresh price
+ * reading (see fill), not at the price that triggered it. The SOL is set aside meanwhile.
+ */
+function open(a: Account, l: Live, size: number, strategy: PaperStrategy, target: AiTarget, now: number) {
   const v = l.view;
-  const liquidity = l.liquidity!;
-  const inUsd = size * sol * (1 - FEE);
-  const gotUsd = swapOut(inUsd, liquidity);
-  const qty = gotUsd / l.price;
   a.cash = r6(a.cash - size - FEE_SOL);
-  a.feesSol += (size * sol - gotUsd) / sol + FEE_SOL;
-  const pos: PaperPosition = {
+  a.positions.push({
     id: `${now.toString(36)}-${(a.seq++).toString(36)}`,
     mint: v.mint,
     symbol: v.symbol,
     icon: v.icon,
     openedAt: now,
     entryPrice: l.price,
-    qty,
+    qty: 0,
     costSol: r6(size + FEE_SOL),
     target,
     closeBy: now + target.holdMin * 60_000,
@@ -211,12 +213,42 @@ function open(a: Account, l: Live, size: number, strategy: PaperStrategy, target
     signal: strategy === 'model' ? (v.ai?.win ?? 0) : (v.score ?? 0),
     lastPrice: l.price,
     lastPriceAt: now,
-    entryLiquidity: Math.round(liquidity),
-    lastLiquidity: Math.round(liquidity),
-  };
-  a.positions.push(pos);
+    entryLiquidity: Math.round(l.liquidity!),
+    lastLiquidity: Math.round(l.liquidity!),
+    pending: true,
+    entrySeenAt: l.freshAt,
+  });
+  touchAccount(a);
+}
+
+/** The buy lands: price and pool as of this (newer) reading, with slippage and fees. */
+function fill(a: Account, pos: PaperPosition, l: Live, sol: number, now: number) {
+  const liquidity = l.liquidity ?? pos.entryLiquidity ?? 0;
+  const size = pos.costSol - FEE_SOL;
+  const gotUsd = swapOut(size * sol * (1 - FEE), liquidity);
+  pos.qty = gotUsd / l.price;
+  pos.entryPrice = l.price;
+  pos.openedAt = now;
+  pos.closeBy = now + pos.target.holdMin * 60_000;
+  pos.lastPrice = l.price;
+  pos.lastPriceAt = now;
+  pos.entryLiquidity = Math.round(liquidity);
+  pos.lastLiquidity = Math.round(liquidity);
+  pos.pending = false;
+  delete pos.entrySeenAt;
+  a.feesSol += (size * sol - gotUsd) / sol + FEE_SOL;
   touchAccount(a);
   emit(a, { type: 'open', position: pos });
+}
+
+/** A buy that never got a price to fill at (or you cancelled it): give the SOL back. */
+function cancel(a: Account, pos: PaperPosition) {
+  a.cash = r6(a.cash + pos.costSol);
+  a.cooldown[pos.mint] = Date.now() + ML.cooldownMs;
+  a.positions = a.positions.filter((p) => p.id !== pos.id);
+  delete a.missingSince[pos.id];
+  touchAccount(a);
+  sendToUser(a.userId, 'bot', accountView(a));
 }
 
 function bump(map: Partial<Record<string, PaperBucket>>, key: string, pnlSol: number) {
@@ -286,13 +318,26 @@ function close(a: Account, pos: PaperPosition, reason: PaperExit, seenPrice: num
 function manage(a: Account, now: number, sol: number) {
   for (const pos of [...a.positions]) {
     const l = live(pos.mint, now);
+    if (pos.pending) {
+      if (l && l.freshAt > (pos.entrySeenAt ?? 0)) {
+        delete a.missingSince[pos.id];
+        fill(a, pos, l, sol, now);
+      } else if (!l && now - (a.missingSince[pos.id] ??= now) >= 60_000) cancel(a, pos);
+      continue;
+    }
     if (l) {
       delete a.missingSince[pos.id];
       pos.lastPrice = l.price;
       pos.lastPriceAt = now;
       if (l.liquidity != null) pos.lastLiquidity = Math.round(l.liquidity);
       const move = (l.price / pos.entryPrice - 1) * 100;
-      if (move >= pos.target.tp) close(a, pos, 'tp', l.price, now, sol);
+      // Target seen: the sale lands at the next fresh reading, like a real sell sent at that moment
+      // (a brief spike has usually faded by then). Capped at the target price in close().
+      if (pos.tpSeenAt != null) {
+        if (l.freshAt > pos.tpSeenAt) close(a, pos, 'tp', l.price, now, sol);
+        continue;
+      }
+      if (move >= pos.target.tp) pos.tpSeenAt = l.freshAt;
       else if (move <= -pos.target.sl) close(a, pos, 'sl', l.price, now, sol);
       else if (now >= pos.closeBy) close(a, pos, 'time', l.price, now, sol);
       continue;
@@ -324,7 +369,7 @@ function candidates(now: number, riskMax: number | null) {
     // A pool bigger than the whole coin's value means the numbers are off.
     if (v.mcap != null && v.mcap > 0 && liq > v.mcap * 1.5) continue;
     if (v.flags.some((f) => f.severity === 'danger')) continue;
-    const l: Live = { price: v.priceUsd!, view: v, liquidity: liq, liquidityConflict: false };
+    const l: Live = { price: v.priceUsd!, view: v, liquidity: liq, liquidityConflict: false, freshAt: info.freshAt };
     if (v.ai?.pick) model.push({ live: l, rank: (v.ai.ev ?? 0) * 100 + v.ai.win });
     const safeEnough = riskMax == null || (v.ai?.risk != null && v.ai.risk <= riskMax);
     if (v.score != null && v.score >= 60 && safeEnough && !v.flags.some((f) => RISKY.has(f.code))) score.push({ live: l, rank: v.score });
@@ -359,7 +404,7 @@ function tick() {
       if (c.live.liquidity! < a.settings.minLiquidity) continue;
       if (a.positions.some((p) => p.mint === v.mint) || (a.cooldown[v.mint] ?? 0) > now) continue;
       const size = tradeSize(a, c.live.liquidity!, sol, now);
-      if (size > 0) open(a, c.live, size, strategy, target, sol, now);
+      if (size > 0) open(a, c.live, size, strategy, target, now);
     }
   }
 }
@@ -505,6 +550,10 @@ export function closeManually(a: Account, positionId: string): boolean {
   const pos = a.positions.find((p) => p.id === positionId);
   const sol = getSolPrice();
   if (!pos || !sol) return false;
+  if (pos.pending) {
+    cancel(a, pos);
+    return true;
+  }
   const now = Date.now();
   close(a, pos, 'manual', live(pos.mint, now)?.price ?? pos.lastPrice, now, sol);
   return true;

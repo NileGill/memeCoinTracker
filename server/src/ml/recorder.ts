@@ -150,6 +150,17 @@ export function obsContext(): ObsContext {
 export interface Outcome {
   /** Seconds until the price first reached each ML.tpLevels gain (-1 = never within the horizon). */
   tp: number[];
+  /**
+   * The % move at the next fresh price reading after each gain level was first reached: what a
+   * real sell, sent when the target is seen, would get once it lands. A brief spike reads much
+   * lower here. Missing in snapshots recorded before this was added.
+   */
+  tpn?: (number | null)[];
+  /**
+   * The % move at the next fresh reading after the snapshot: where a buy sent at the snapshot
+   * would land. Missing in snapshots recorded before this was added.
+   */
+  e1?: number | null;
   /** Seconds until it first fell by each ML.slLevels loss (-1 = never). */
   sl: number[];
   /** The actual % move seen when each loss level was first crossed (gaps make it worse than the level). */
@@ -166,7 +177,7 @@ export interface Outcome {
   gap: number;
 }
 
-const OUT_FIELDS = ['tp', 'sl', 'slr', 'rq', 'hi', 'lo', 'last', 'gone', 'gap'] as const;
+const OUT_FIELDS = ['tp', 'tpn', 'e1', 'sl', 'slr', 'rq', 'hi', 'lo', 'last', 'gone', 'gap'] as const;
 
 interface Open {
   obs: Obs;
@@ -174,6 +185,10 @@ interface Open {
   out: Outcome;
   lastR: number;
   staleSince: number | null;
+  /** The price reading (freshAt) at which each gain level was first reached. */
+  tpSeenAt: number[];
+  /** The price reading the snapshot was taken from. */
+  seenAt: number;
 }
 
 const open: Open[] = [];
@@ -203,8 +218,12 @@ function sample(now: number) {
       t0: now,
       lastR: 0,
       staleSince: null,
+      tpSeenAt: ML.tpLevels.map(() => 0),
+      seenAt: info.freshAt,
       out: {
+        e1: null,
         tp: ML.tpLevels.map(() => -1),
+        tpn: ML.tpLevels.map(() => null),
         sl: ML.slLevels.map(() => -1),
         slr: ML.slLevels.map(() => null),
         rq: CHECKPOINTS.map(() => null),
@@ -237,11 +256,18 @@ function follow(now: number) {
       o.staleSince = null;
       const r = (price / o.obs.price - 1) * 100;
       o.lastR = r;
+      if (o.out.e1 == null && info.freshAt > o.seenAt) o.out.e1 = r2(r);
       o.out.hi = Math.max(o.out.hi, r);
       o.out.lo = Math.min(o.out.lo, r);
       o.out.last = sec;
       ML.tpLevels.forEach((lvl, k) => {
-        if (o.out.tp[k] < 0 && r >= lvl) o.out.tp[k] = sec;
+        const tpn = o.out.tpn!;
+        // A newer reading after the level was reached: where a sell sent at that moment would land.
+        if (o.out.tp[k] >= 0 && tpn[k] == null && info.freshAt > o.tpSeenAt[k]) tpn[k] = r2(r);
+        if (o.out.tp[k] < 0 && r >= lvl) {
+          o.out.tp[k] = sec;
+          o.tpSeenAt[k] = info.freshAt;
+        }
       });
       ML.slLevels.forEach((lvl, k) => {
         if (o.out.sl[k] < 0 && r <= -lvl) {
@@ -274,6 +300,9 @@ function follow(now: number) {
     if (!done) continue;
     if (!o.out.gone && !o.out.gap && o.out.last < horizonSec * 0.9) o.out.gap = 1; // prices went missing near the end
     o.out.rq = o.out.rq.map((v) => v ?? r2(o.lastR));
+    o.out.e1 ??= r2(o.lastR);
+    // Reached a level but no newer reading came before the end: the last price is all we know.
+    o.out.tpn = o.out.tpn!.map((v, k) => (v == null && o.out.tp[k] >= 0 ? r2(o.lastR) : v));
     o.out.hi = r2(o.out.hi);
     o.out.lo = r2(o.out.lo);
     open.splice(i, 1);
@@ -287,12 +316,25 @@ function follow(now: number) {
 
 // ---------------------------------------------------------------- in-memory training set
 
-/** Values stored per row for outcomes: tp, sl, slr, rq, hi, lo, last, gone, gap. */
+/** Values stored per row for outcomes: tp, sl, slr, rq, hi, lo, last, gone, gap, tpn. */
 const NT = ML.tpLevels.length;
 const NS = ML.slLevels.length;
 const NQ = CHECKPOINTS.length;
-export const OUT_W = NT + NS + NS + NQ + 5;
-export const OUT_AT = { tp: 0, sl: NT, slr: NT + NS, rq: NT + 2 * NS, hi: NT + 2 * NS + NQ, lo: NT + 2 * NS + NQ + 1, last: NT + 2 * NS + NQ + 2, gone: NT + 2 * NS + NQ + 3, gap: NT + 2 * NS + NQ + 4 };
+const BASE_W = NT + 2 * NS + NQ;
+export const OUT_W = BASE_W + 5 + NT + 1;
+export const OUT_AT = {
+  tp: 0,
+  sl: NT,
+  slr: NT + NS,
+  rq: NT + 2 * NS,
+  hi: BASE_W,
+  lo: BASE_W + 1,
+  last: BASE_W + 2,
+  gone: BASE_W + 3,
+  gap: BASE_W + 4,
+  tpn: BASE_W + 5,
+  e1: BASE_W + 5 + NT,
+};
 
 const F = NUM_FEATURES;
 const CAP = Math.ceil(ML.maxRows * 1.1);
@@ -347,6 +389,8 @@ function writeRow(obs: Obs, out: Outcome) {
   featurize(obs, data.X, i * F);
   const o = i * OUT_W;
   out.tp.forEach((v, k) => (data.out[o + OUT_AT.tp + k] = v));
+  for (let k = 0; k < NT; k++) data.out[o + OUT_AT.tpn + k] = out.tpn?.[k] ?? NaN;
+  data.out[o + OUT_AT.e1] = out.e1 ?? NaN;
   out.sl.forEach((v, k) => (data.out[o + OUT_AT.sl + k] = v));
   out.slr.forEach((v, k) => (data.out[o + OUT_AT.slr + k] = v ?? NaN));
   out.rq.forEach((v, k) => (data.out[o + OUT_AT.rq + k] = v ?? NaN));

@@ -29,7 +29,7 @@ const FEATURE_LABELS = FEATURES.map((f) => f.label);
 const CRASH_LEVEL = ML.slLevels.length - 1;
 
 interface SavedModel {
-  v: 3;
+  v: 4;
   schema: number;
   /** Cost per side the test charged; a model tested at a different cost is retrained. */
   cost: number;
@@ -70,18 +70,30 @@ interface Outcome {
   exitSec: number;
 }
 
-const netReturn = (grossPct: number) => ((1 + grossPct / 100) * (1 - ML.costPerSide)) / (1 + ML.costPerSide) * 100 - 100;
+/** % result after costs of buying at `entryPct` and selling at `exitPct` (both measured from the snapshot price). */
+const netFrom = (exitPct: number, entryPct: number) =>
+  (((1 + exitPct / 100) / (1 + entryPct / 100)) * (1 - ML.costPerSide)) / (1 + ML.costPerSide) * 100 - 100;
 
-/** What a bot trade with this target would have done from snapshot `i` (null = unusable row). */
+/**
+ * What a bot trade with this target would have done from snapshot `i` (null = unusable row).
+ * The buy lands at the next reading after the snapshot, not at the snapshot price.
+ */
 function outcomeFor(d: Dataset, i: number, t: Target): Outcome | null {
   const o = i * OUT_W;
   if (d.out[o + OUT_AT.gap]) return null;
+  const e1 = d.out[o + OUT_AT.e1];
+  const entry = Number.isNaN(e1) ? 0 : e1;
+  const netReturn = (grossFromSnapshot: number) => netFrom(grossFromSnapshot, entry);
   const ti = ML.tpLevels.indexOf(t.tp);
   const si = ML.slLevels.indexOf(t.sl);
   const tpT = d.out[o + OUT_AT.tp + ti];
   const slT = d.out[o + OUT_AT.sl + si];
-  // Same tick counts as the stop (conservative).
-  if (tpT >= 0 && (slT < 0 || tpT < slT)) return { y: 1, ret: netReturn(t.tp), exitSec: tpT };
+  // Same tick counts as the stop (conservative). A target sale fills at the next reading after the
+  // target is reached (capped at the target), so brief spikes don't count as full wins.
+  if (tpT >= 0 && (slT < 0 || tpT < slT)) {
+    const next = d.out[o + OUT_AT.tpn + ti];
+    return { y: 1, ret: netReturn(Number.isNaN(next) ? t.tp : Math.min(t.tp, next)), exitSec: tpT };
+  }
   if (slT >= 0) {
     const r = d.out[o + OUT_AT.slr + si];
     return { y: 0, ret: netReturn(Number.isNaN(r) ? -t.sl : r), exitSec: slT };
@@ -414,7 +426,18 @@ async function train() {
     // The score strategy (used before the AI is proven) only gets the crash filter if it didn't make results worse.
     if (scoreFiltered && baseline && scoreFiltered.avgReturn < baseline.avgReturn) scoreRiskMax = null;
 
+    // Only trust the test once most of its target sales were measured with the sell delay.
+    const tpIdx = ML.tpLevels.indexOf(best.target.tp);
+    const measured = testRows.filter(
+      (i, k) => !Number.isNaN(d.out[i * OUT_W + OUT_AT.e1]) && (testOuts[k].y !== 1 || !Number.isNaN(d.out[i * OUT_W + OUT_AT.tpn + tpIdx])),
+    ).length;
+    const coverage = testRows.length ? measured / testRows.length : 1;
+
     const problems: string[] = [];
+    if (coverage < 0.8)
+      problems.push(
+        `Most of its test period was recorded before buy and sell delays were measured (${Math.round(coverage * 100)}% measured), so its results are likely too rosy. Waiting for newer data.`,
+      );
     if (test.avgReturn < ML.proven.minAvgReturn)
       problems.push(`Test trades averaged ${round(test.avgReturn, 1)}% after fees (needs +${ML.proven.minAvgReturn}% or better).`);
     if (test.trades < minTrades) problems.push(`Only ${test.trades} test trades (needs ${minTrades}): not enough to judge.`);
@@ -463,7 +486,7 @@ async function train() {
       topFeatures,
     };
     current = {
-      v: 3,
+      v: 4,
       schema: ML.schema,
       cost: ML.costPerSide,
       featureLabels: FEATURE_LABELS,
@@ -613,7 +636,7 @@ export async function startModel() {
   try {
     const saved = await kvGet<SavedModel>(ML.modelKey);
     if (
-      saved?.v === 3 &&
+      saved?.v === 4 &&
       saved.cost === ML.costPerSide &&
       saved.schema === ML.schema &&
       JSON.stringify(saved.featureLabels) === JSON.stringify(FEATURE_LABELS) &&
