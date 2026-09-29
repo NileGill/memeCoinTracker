@@ -10,25 +10,37 @@ import { borrowDataset, obsContext, OUT_AT, OUT_W, recorderStatus, type Dataset 
 /*
  * Training and using the model.
  *
- * The question it answers: "if I bought this coin right now, would it hit +X% before -Y%
- * within the hour?" Data is split by time into three parts. The model learns on the oldest
- * 70%, the next 15% picks which target and confidence bar work best, and the newest 15%
- * (never used for any choice) is the honest test. It is only called proven, and only then
- * trusted by the bot, when trades in that test period made money after fees.
+ * Two models answer two questions about a coin right now:
+ *   1. "If I bought it, would it hit +X% before -Y% within the hour?"  (the win model)
+ *   2. "Will it crash 50%+ (or its price vanish) within the hour?"      (the crash model)
+ * The first alone can't tell a -15% stop from a -100% rug, and rugs gap straight through any
+ * stop, so the bot only buys coins the first model likes AND the second doesn't flag.
+ *
+ * Data is split by time into three parts. The models learn on the oldest 70%, the next 15%
+ * picks the target, the confidence bar and the crash cutoff, and the newest 15% (never used for
+ * any choice) is the honest test. The AI is only called proven, and only then followed by the
+ * bot, when trades in that test period made money after fees.
  */
 
 const F = NUM_FEATURES;
 const horizonSec = ML.horizonMs / 1000;
 const FEATURE_LABELS = FEATURES.map((f) => f.label);
+/** The deepest recorded loss level (50%): hitting it counts as a crash. */
+const CRASH_LEVEL = ML.slLevels.length - 1;
 
 interface SavedModel {
-  v: 1;
+  v: 2;
   schema: number;
   featureLabels: string[];
   gbdt: GbdtModel;
+  crash: GbdtModel | null;
   info: MlModelInfo;
-  /** Raw model probability the bot buys at. */
+  /** Raw win-model probability the bot buys at. */
   threshold: number;
+  /** Crash chance above which the AI bot skips a coin (null = no cap). */
+  riskMax: number | null;
+  /** The same cap for the score strategy used before the AI is proven (null = no cap). */
+  scoreRiskMax: number | null;
   /** Probability -> observed win rate and average return (from data the model didn't learn on). */
   calib: { p: number[]; win: number[]; ev: number[] };
 }
@@ -66,6 +78,13 @@ function outcomeFor(d: Dataset, i: number, t: Target): Outcome | null {
   const end = d.out[o + OUT_AT.rq + 2];
   if (Number.isNaN(end)) return null;
   return { y: 0, ret: netReturn(end), exitSec: horizonSec };
+}
+
+/** 1 if the coin fell 50%+ at some point in the hour or its price feed died, 0 if not, null if unusable. */
+function crashFor(d: Dataset, i: number): number | null {
+  const o = i * OUT_W;
+  if (d.out[o + OUT_AT.gap]) return null;
+  return d.out[o + OUT_AT.gone] || d.out[o + OUT_AT.sl + CRASH_LEVEL] >= 0 ? 1 : 0;
 }
 
 // ---------------------------------------------------------------- backtest
@@ -119,18 +138,62 @@ const cleanSim = (s: Sim): StrategyResult => ({
   profitFactor: s.profitFactor == null ? null : round(s.profitFactor),
 });
 
-/** Try confidence bars from "top 1%" to "top half" and keep the most profitable one with enough trades. */
-function pickThreshold(d: Dataset, rows: Int32Array, outs: (Outcome | null)[], prob: ArrayLike<number>, minTrades: number) {
-  const sorted = Array.from(prob).sort((a, b) => b - a);
-  let best: { th: number; sim: Sim } | null = null;
-  for (const frac of [0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.5]) {
-    const th = sorted[Math.min(sorted.length - 1, Math.floor(frac * sorted.length))];
-    if (th === undefined) continue;
-    const sim = simulate(d, rows, outs, (k) => prob[k] >= th);
-    if (sim.trades < minTrades) continue;
-    if (!best || sim.avgReturn > best.sim.avgReturn) best = { th, sim };
+/**
+ * The most profitable option; among options within a whisker of it, the one that wins most
+ * often (then the one with more trades).
+ */
+function chooseBest<T>(items: T[], sim: (t: T) => Sim): T | null {
+  if (!items.length) return null;
+  const top = Math.max(...items.map((x) => sim(x).avgReturn));
+  const close = items.filter((x) => sim(x).avgReturn >= top - ML.preferWinRateWithin);
+  close.sort((a, b) => sim(b).winRate - sim(a).winRate || sim(b).trades - sim(a).trades);
+  return close[0];
+}
+
+interface Rule {
+  /** Buy when the signal is at least this. */
+  th: number;
+  /** ...and the crash chance is at most this (null = no cap). */
+  risk: number | null;
+  sim: Sim;
+}
+
+/**
+ * Choose how picky to be on the tuning data: a bar for the signal (by default from "top 1%" to
+ * "top half"), and optionally a crash-risk cap that skips the riskiest 10-70% of coins.
+ */
+function pickRule(
+  d: Dataset,
+  rows: Int32Array,
+  outs: (Outcome | null)[],
+  signal: ArrayLike<number>,
+  risk: ArrayLike<number> | null,
+  minTrades: number,
+  bars?: number[],
+): Rule | null {
+  let ths = bars;
+  if (!ths) {
+    const desc = Array.from(signal)
+      .filter((v) => !Number.isNaN(v))
+      .sort((a, b) => b - a);
+    ths = [0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.5]
+      .map((f) => desc[Math.min(desc.length - 1, Math.floor(f * desc.length))])
+      .filter((v) => v !== undefined);
   }
-  return best;
+  const caps: (number | null)[] = [null];
+  if (risk) {
+    const asc = Array.from(risk)
+      .filter((v) => !Number.isNaN(v))
+      .sort((a, b) => a - b);
+    for (const keep of [0.9, 0.8, 0.7, 0.5, 0.3]) if (asc.length) caps.push(asc[Math.min(asc.length - 1, Math.floor(keep * asc.length))]);
+  }
+  const found: Rule[] = [];
+  for (const th of ths)
+    for (const cap of caps) {
+      const sim = simulate(d, rows, outs, (k) => signal[k] >= th && (cap == null || risk![k] <= cap));
+      if (sim.trades >= minTrades) found.push({ th, risk: cap, sim });
+    }
+  return chooseBest(found, (r) => r.sim);
 }
 
 // ---------------------------------------------------------------- calibration
@@ -232,79 +295,117 @@ async function train() {
     if (tuneAll.length < minPart || testAll.length < minPart) throw new Note('Not enough recent data to test on yet.');
 
     const minTrades = ML.proven.minTrades;
+    const tuneMinTrades = Math.max(3, Math.round(minTrades * 0.6));
     const minLeaf = Math.max(10, Math.min(60, Math.floor(trainAll.length / 50)));
-    type Cand = { target: Target; gbdt: GbdtModel; th: number; tune: Sim; tuneAuc: number };
-    const cands: Cand[] = [];
+    const params = { minLeaf, rounds: 250, learningRate: 0.08, colSample: 0.6 };
     const y = new Float32Array(n);
+    const rowX = (i: number) => d.X.subarray(i * F, (i + 1) * F);
 
+    // ---- the crash model: which coins fall 50%+ (or vanish) within the hour
+    let crashModel: GbdtModel | null = null;
+    const crashProb = new Float64Array(n).fill(NaN);
+    let crashTuneAuc = 0;
+    let crashTestAuc = 0;
+    let crashRate = 0;
+    {
+      const labelled = (rows: Int32Array) =>
+        Int32Array.from(
+          Array.from(rows).filter((i) => {
+            const c = crashFor(d, i);
+            if (c === null) return false;
+            y[i] = c;
+            return true;
+          }),
+        );
+      const tr = labelled(trainAll);
+      const tu = labelled(tuneAll);
+      const pos = tr.reduce((a, i) => a + y[i], 0);
+      if (pos >= 20 && tr.length - pos >= 20 && tu.length) {
+        const fit = await fitGbdt({ X: d.X, F, y, train: tr, valid: tu, params, pacer });
+        crashModel = fit.model;
+        tu.forEach((i, k) => (crashProb[i] = fit.validProb![k]));
+        crashTuneAuc = auc(fit.validProb!, Array.from(tu, (i) => y[i]));
+        const te = labelled(testAll);
+        const teProb = Array.from(te, (i) => (crashProb[i] = predict(fit.model, rowX(i))));
+        crashTestAuc = auc(teProb, Array.from(te, (i) => y[i]));
+        crashRate = te.length ? te.reduce((a, i) => a + y[i], 0) / te.length : 0;
+        for (const i of testAll) if (Number.isNaN(crashProb[i])) crashProb[i] = predict(fit.model, rowX(i));
+      }
+    }
+    // Only let the crash model veto trades if it showed real skill on data it didn't learn from.
+    const crashUsable = crashModel !== null && crashTuneAuc >= 0.55;
+
+    // ---- the win model, once per target; the tuning data picks the bar and the crash cutoff
+    type Cand = { target: Target; gbdt: GbdtModel; rule: Rule };
+    const cands: Cand[] = [];
+    const withOutcomes = (rows: Int32Array, target: Target) => {
+      const r: number[] = [];
+      const o: Outcome[] = [];
+      for (const i of rows) {
+        const oc = outcomeFor(d, i, target);
+        if (!oc) continue;
+        r.push(i);
+        o.push(oc);
+      }
+      return { rows: Int32Array.from(r), outs: o };
+    };
     for (const target of ML.targets) {
-      const keep = (rows: Int32Array) => {
-        const r: number[] = [];
-        const o: Outcome[] = [];
-        for (const i of rows) {
-          const oc = outcomeFor(d, i, target);
-          if (!oc) continue;
-          r.push(i);
-          o.push(oc);
-          y[i] = oc.y;
-        }
-        return { rows: Int32Array.from(r), outs: o };
-      };
-      const tr = keep(trainAll);
-      const tu = keep(tuneAll);
+      const tr = withOutcomes(trainAll, target);
+      const tu = withOutcomes(tuneAll, target);
+      tr.rows.forEach((i, k) => (y[i] = tr.outs[k].y));
+      tu.rows.forEach((i, k) => (y[i] = tu.outs[k].y));
       const pos = tr.outs.reduce((a, o) => a + o.y, 0);
       if (pos < 20 || tr.outs.length - pos < 20 || !tu.rows.length) continue;
-      const fit = await fitGbdt({ X: d.X, F, y, train: tr.rows, valid: tu.rows, params: { minLeaf, rounds: 250, learningRate: 0.08, colSample: 0.6 }, pacer });
-      const prob = fit.validProb!;
-      const pick = pickThreshold(d, tu.rows, tu.outs, prob, Math.max(3, Math.round(minTrades * 0.6)));
-      if (!pick) continue;
-      cands.push({ target, gbdt: fit.model, th: pick.th, tune: pick.sim, tuneAuc: auc(prob, tu.outs.map((o) => o.y)) });
+      const fit = await fitGbdt({ X: d.X, F, y, train: tr.rows, valid: tu.rows, params, pacer });
+      const risk = crashUsable ? Array.from(tu.rows, (i) => crashProb[i]) : null;
+      const rule = pickRule(d, tu.rows, tu.outs, fit.validProb!, risk, tuneMinTrades);
+      if (rule) cands.push({ target, gbdt: fit.model, rule });
     }
-    if (!cands.length) throw new Note('Too few coins hit any profit target yet to learn what winners look like.');
-    cands.sort((a, b) => b.tune.avgReturn - a.tune.avgReturn);
-    const best = cands[0];
+    const best = chooseBest(cands, (c) => c.rule.sim);
+    if (!best) throw new Note('Too few coins hit any profit target yet to learn what winners look like.');
 
     // ---- the honest test: the newest data, untouched by every choice above
-    const testRows: number[] = [];
-    const testOuts: Outcome[] = [];
-    for (const i of testAll) {
-      const oc = outcomeFor(d, i, best.target);
-      if (!oc) continue;
-      testRows.push(i);
-      testOuts.push(oc);
-    }
-    const testIdx = Int32Array.from(testRows);
-    const testProb = testRows.map((i) => predict(best.gbdt, d.X.subarray(i * F, (i + 1) * F)));
+    const test0 = withOutcomes(testAll, best.target);
+    const testRows = Array.from(test0.rows);
+    const testOuts = test0.outs;
+    const testIdx = test0.rows;
+    const testProb = testRows.map((i) => predict(best.gbdt, rowX(i)));
+    const testRisk = testRows.map((i) => crashProb[i]);
     const testAuc = auc(testProb, testOuts.map((o) => o.y));
-    const test = simulate(d, testIdx, testOuts, (k) => testProb[k] >= best.th);
+    const rule = best.rule;
+    const test = simulate(d, testIdx, testOuts, (k) => testProb[k] >= rule.th && (rule.risk == null || testRisk[k] <= rule.risk));
     const baseRate = testOuts.length ? testOuts.reduce((a, o) => a + o.y, 0) / testOuts.length : 0;
 
-    // ---- the same periods traded on the plain MemeRadar score, for comparison
-    const tuneRows: number[] = [];
-    const tuneOuts: Outcome[] = [];
-    for (const i of tuneAll) {
-      const oc = outcomeFor(d, i, best.target);
-      if (!oc) continue;
-      tuneRows.push(i);
-      tuneOuts.push(oc);
-    }
-    const tuneIdx = Int32Array.from(tuneRows);
-    let baseline: MlModelInfo['baseline'] = null;
-    let bestScore: { th: number; sim: Sim } | null = null;
-    for (const th of [55, 60, 65, 70, 75, 80, 85]) {
-      const sim = simulate(d, tuneIdx, tuneOuts, (k) => d.score[tuneRows[k]] >= th);
-      if (sim.trades >= Math.max(3, Math.round(minTrades * 0.6)) && (!bestScore || sim.avgReturn > bestScore.sim.avgReturn))
-        bestScore = { th, sim };
-    }
-    if (bestScore) {
-      const th = bestScore.th;
-      baseline = { ...cleanSim(simulate(d, testIdx, testOuts, (k) => d.score[testRows[k]] >= th)), threshold: th };
-    }
+    // ---- the same periods traded on the MemeRadar score, alone and with the crash filter
+    const tune0 = withOutcomes(tuneAll, best.target);
+    const tuneRows = Array.from(tune0.rows);
+    const tuneOuts = tune0.outs;
+    const scoreBars = [55, 60, 65, 70, 75, 80, 85];
+    const tuneScore = tuneRows.map((i) => d.score[i]);
+    const testScore = testRows.map((i) => d.score[i]);
+    const plain = pickRule(d, tune0.rows, tuneOuts, tuneScore, null, tuneMinTrades, scoreBars);
+    const baseline: MlModelInfo['baseline'] = plain
+      ? { ...cleanSim(simulate(d, testIdx, testOuts, (k) => testScore[k] >= plain.th)), threshold: plain.th }
+      : null;
+    const filtered = crashUsable
+      ? pickRule(d, tune0.rows, tuneOuts, tuneScore, tuneRows.map((i) => crashProb[i]), tuneMinTrades, scoreBars)
+      : null;
+    let scoreRiskMax = filtered?.risk ?? null;
+    const scoreFiltered: MlModelInfo['scoreFiltered'] =
+      filtered && filtered.risk != null
+        ? {
+            ...cleanSim(simulate(d, testIdx, testOuts, (k) => testScore[k] >= filtered.th && testRisk[k] <= filtered.risk!)),
+            threshold: filtered.th,
+          }
+        : null;
+
+    // The score strategy (used before the AI is proven) only gets the crash filter if it didn't make results worse.
+    if (scoreFiltered && baseline && scoreFiltered.avgReturn < baseline.avgReturn) scoreRiskMax = null;
 
     const problems: string[] = [];
-    if (test.trades < minTrades) problems.push(`Only ${test.trades} test trades (needs ${minTrades}): not enough to judge.`);
     if (test.avgReturn < ML.proven.minAvgReturn)
       problems.push(`Test trades averaged ${round(test.avgReturn, 1)}% after fees (needs +${ML.proven.minAvgReturn}% or better).`);
+    if (test.trades < minTrades) problems.push(`Only ${test.trades} test trades (needs ${minTrades}): not enough to judge.`);
     if (testAuc < ML.proven.minAuc) problems.push(`Its ranking of coins wasn't reliably better than chance (skill ${round(testAuc, 2)}; needs ${ML.proven.minAuc}).`);
 
     const imp = importance(best.gbdt);
@@ -316,7 +417,7 @@ async function train() {
 
     const calibRows = [...tuneRows, ...testRows];
     const calibOuts = [...tuneOuts, ...testOuts];
-    const calibProb = calibRows.map((i) => predict(best.gbdt, d.X.subarray(i * F, (i + 1) * F)));
+    const calibProb = calibRows.map((i) => predict(best.gbdt, rowX(i)));
     const mints = new Set<number>();
     for (let i = 0; i < n; i++) mints.add(d.mint[i]);
 
@@ -335,23 +436,30 @@ async function train() {
       baseRate: round(baseRate, 3),
       test: cleanSim(test),
       baseline,
+      scoreFiltered,
+      crash: crashModel ? { auc: round(crashTestAuc, 3), rate: round(crashRate, 3), maxRisk: rule.risk == null ? null : round(rule.risk, 3) } : null,
       proven: problems.length === 0,
       problems,
       topFeatures,
     };
     current = {
-      v: 1,
+      v: 2,
       schema: ML.schema,
       featureLabels: FEATURE_LABELS,
       gbdt: best.gbdt,
+      crash: crashUsable ? crashModel : null,
       info,
-      threshold: best.th,
+      threshold: rule.th,
+      riskMax: rule.risk,
+      scoreRiskMax,
       calib: calibrate(calibProb, calibOuts),
     };
     lastNote = null;
     console.log(
-      `[ml] trained in ${((Date.now() - startedAt) / 1000).toFixed(1)}s on ${trainAll.length} rows: target +${best.target.tp}/-${best.target.sl}, ` +
-        `test AUC ${info.auc}, ${test.trades} test trades averaging ${round(test.avgReturn, 2)}% -> ${info.proven ? 'PROVEN' : 'not proven'}`,
+      `[ml] trained in ${((Date.now() - startedAt) / 1000).toFixed(1)}s on ${trainAll.length} rows: target +${best.target.tp}/-${best.target.sl}` +
+        `, crash model skill ${round(crashTestAuc, 2)}${rule.risk != null ? ` (cap ${round(rule.risk, 2)})` : ' (no cap)'}` +
+        `, test AUC ${info.auc}, ${test.trades} test trades winning ${Math.round(test.winRate * 100)}% averaging ${round(test.avgReturn, 2)}%` +
+        ` -> ${info.proven ? 'PROVEN' : 'not proven'}`,
     );
     await kvSet(ML.modelKey, current).catch((e) => console.error('[ml] saving model failed:', e instanceof Error ? e.message : e));
   } catch (e) {
@@ -372,16 +480,18 @@ class Note extends Error {}
 
 // ---------------------------------------------------------------- live predictions
 
-/** The model's read on a coin right now (null without a model). */
-function signalFor(v: TokenView, p: number): AiSignal {
+/** The models' read on a coin right now: win model probability `p`, crash chance `risk`. */
+function signalFor(v: TokenView, p: number, risk: number | null): AiSignal {
   const c = current!;
   const win = interp(c.calib.p, c.calib.win, p);
   const ev = interp(c.calib.p, c.calib.ev, p);
   const danger = v.flags.some((f) => f.severity === 'danger');
+  const safeEnough = c.riskMax == null || (risk != null && risk <= c.riskMax);
   return {
     win: round(Number.isFinite(win) ? win : p, 2),
     ev: Number.isFinite(ev) ? round(ev, 1) : null,
-    pick: c.info.proven && p >= c.threshold && (v.liquidity ?? 0) >= ML.tradeMinLiquidity && !danger,
+    risk: risk == null ? null : round(risk, 2),
+    pick: c.info.proven && p >= c.threshold && safeEnough && (v.liquidity ?? 0) >= ML.tradeMinLiquidity && !danger,
   };
 }
 
@@ -393,7 +503,7 @@ setViewDecorator((views) => {
     const obs = makeObs(v, ctx);
     if (!obs) continue;
     featurize(obs, x);
-    v.ai = signalFor(v, predict(current.gbdt, x));
+    v.ai = signalFor(v, predict(current.gbdt, x), current.crash ? predict(current.crash, x) : null);
   }
 });
 
@@ -412,10 +522,18 @@ export function explain(v: TokenView): AiDriver[] | null {
     .slice(0, 8);
 }
 
-/** What the bot needs from the model: is it trustworthy, and what does it trade toward. */
-export function modelForBot(): { proven: boolean; target: AiTarget; version: number } | null {
+/**
+ * What the bot needs from the models: is the AI trustworthy, what does it trade toward, and the
+ * crash-chance cap to apply to score trades before then (null = none).
+ */
+export function modelForBot(): { proven: boolean; target: AiTarget; version: number; scoreRiskMax: number | null } | null {
   if (!current) return null;
-  return { proven: current.info.proven, target: current.info.target, version: current.info.version };
+  return {
+    proven: current.info.proven,
+    target: current.info.target,
+    version: current.info.version,
+    scoreRiskMax: current.crash ? current.scoreRiskMax : null,
+  };
 }
 
 // ---------------------------------------------------------------- status
@@ -470,7 +588,7 @@ export async function startModel() {
   try {
     const saved = await kvGet<SavedModel>(ML.modelKey);
     if (
-      saved?.v === 1 &&
+      saved?.v === 2 &&
       saved.schema === ML.schema &&
       JSON.stringify(saved.featureLabels) === JSON.stringify(FEATURE_LABELS) &&
       saved.gbdt?.trees?.length

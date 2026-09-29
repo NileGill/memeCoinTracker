@@ -2,7 +2,7 @@ import { gunzipSync, gzipSync } from 'node:zlib';
 import { db } from '../auth/db';
 import { allEntries, entryInfo, getSolPrice, marketCounts, registerHold } from '../engine/market';
 import { ML } from './config';
-import { decodeObs, encodeObs, featurize, hasDanger, makeObs, NUM_FEATURES, OBS_FIELDS, type Obs, type ObsContext } from './features';
+import { decodeObs, encodeObs, featurize, hasDanger, makeObs, NUM_FEATURES, OBS_FIELDS, type Obs, type ObsContext, type TapeStats } from './features';
 
 /*
  * The model's training data, collected by MemeRadar itself. No free source offers the full
@@ -24,7 +24,8 @@ const GONE_RETURN = -90;
 
 const TAPE_MS = 12 * 60_000;
 const TAPE_STEP = 15_000;
-const tape = new Map<string, { t: number[]; p: number[] }>();
+/** Per coin, every ~15s: time, price, liquidity, holders (NaN when unknown). */
+const tape = new Map<string, { t: number[]; p: number[]; l: number[]; h: number[] }>();
 const solTape: { t: number; p: number }[] = [];
 let breadth: number | null = null;
 let feedsHealthy = true;
@@ -50,14 +51,18 @@ function recordTape(now: number) {
     const price = v.priceUsd;
     if (price == null || !(price > 0) || now - info.freshAt > 90_000) continue;
     let tp = tape.get(v.mint);
-    if (!tp) tape.set(v.mint, (tp = { t: [], p: [] }));
+    if (!tp) tape.set(v.mint, (tp = { t: [], p: [], l: [], h: [] }));
     if (!tp.t.length || now - tp.t[tp.t.length - 1] >= TAPE_STEP) {
       tp.t.push(now);
       tp.p.push(price);
+      tp.l.push(v.liquidity ?? NaN);
+      tp.h.push(v.holders ?? NaN);
     }
     while (tp.t.length && tp.t[0] < now - TAPE_MS) {
       tp.t.shift();
       tp.p.shift();
+      tp.l.shift();
+      tp.h.shift();
     }
   }
   for (const mint of tape.keys()) if (!seen.has(mint)) tape.delete(mint);
@@ -82,6 +87,52 @@ function tapeReturn(mint: string, minutes: number): number | null {
   return (price / tp.p[i] - 1) * 100;
 }
 
+/** Index of the last tape point at or before `target`, or -1 when the tape doesn't reach back that far. */
+function pointAt(t: number[], target: number): number {
+  if (!t.length || t[0] > target + TAPE_STEP) return -1;
+  let i = 0;
+  while (i + 1 < t.length && t[i + 1] <= target) i++;
+  return i;
+}
+
+const pctChange = (now: number | null | undefined, then: number) =>
+  now == null || !Number.isFinite(now) || !Number.isFinite(then) || !(then > 0) ? null : (now / then - 1) * 100;
+
+const NO_STATS: TapeStats = { l3: null, l10: null, h10: null, vol10: null, dd10: null };
+
+/** Liquidity and holder trends, choppiness and drop from the recent high, from the live tape. */
+function tapeStats(mint: string): TapeStats {
+  const tp = tape.get(mint);
+  const view = entryInfo(mint)?.view;
+  if (!tp || !view || tp.t.length < 2) return NO_STATS;
+  const now = Date.now();
+  const i3 = pointAt(tp.t, now - 3 * 60_000);
+  const i10 = pointAt(tp.t, now - 10 * 60_000);
+  let vol10: number | null = null;
+  let dd10: number | null = null;
+  if (i10 >= 0) {
+    const rets: number[] = [];
+    let hi = 0;
+    for (let k = i10; k < tp.p.length; k++) {
+      hi = Math.max(hi, tp.p[k]);
+      if (k > i10) rets.push(Math.log(tp.p[k] / tp.p[k - 1]));
+    }
+    if (rets.length >= 5) {
+      const mean = rets.reduce((a, r) => a + r, 0) / rets.length;
+      vol10 = Math.sqrt(rets.reduce((a, r) => a + (r - mean) ** 2, 0) / rets.length) * 100;
+    }
+    const price = view.priceUsd;
+    if (price != null && price > 0 && hi > 0) dd10 = (Math.max(hi, price) - price) / Math.max(hi, price) * 100;
+  }
+  return {
+    l3: i3 >= 0 ? pctChange(view.liquidity, tp.l[i3]) : null,
+    l10: i10 >= 0 ? pctChange(view.liquidity, tp.l[i10]) : null,
+    h10: i10 >= 0 ? pctChange(view.holders, tp.h[i10]) : null,
+    vol10,
+    dd10,
+  };
+}
+
 function solChange1h(): number | null {
   const sol = getSolPrice();
   if (!sol || !solTape.length || Date.now() - solTape[0].t < 55 * 60_000) return null;
@@ -91,7 +142,7 @@ function solChange1h(): number | null {
 /** Everything a snapshot needs besides the coin itself. Shared with live predictions so both see the same inputs. */
 export function obsContext(): ObsContext {
   const { launches1h, grads1h } = marketCounts();
-  return { now: Date.now(), tapeReturn, sol1h: solChange1h(), launches1h, grads1h, breadth };
+  return { now: Date.now(), tapeReturn, tapeStats, sol1h: solChange1h(), launches1h, grads1h, breadth };
 }
 
 // ---------------------------------------------------------------- snapshots and outcomes

@@ -93,6 +93,8 @@ export interface AiSignal {
   win: number;
   /** Average result of those test trades after fees, in % (null when too few to say). */
   ev: number | null;
+  /** Chance it crashes 50%+ (or its price vanishes) within the hour, 0-1 (null without a crash model). */
+  risk: number | null;
   /** Clears the bar the bot buys at. Only ever true once the model has proven itself. */
   pick: boolean;
 }
@@ -132,6 +134,17 @@ export interface MlModelInfo {
   test: StrategyResult;
   /** The same test period traded on the plain MemeRadar score, for comparison. */
   baseline: (StrategyResult & { threshold: number }) | null;
+  /** The score plus the crash filter (what the bot trades before the AI is proven). */
+  scoreFiltered: (StrategyResult & { threshold: number }) | null;
+  /** The second model, which spots coins about to crash 50%+ (rugs, dumps). */
+  crash: {
+    /** Ranking skill on the test period (0.5 = coin flip). */
+    auc: number;
+    /** Share of test snapshots that crashed. */
+    rate: number;
+    /** Crash chance above which the AI bot skips a coin (null = no filter needed). */
+    maxRisk: number | null;
+  } | null;
   proven: boolean;
   /** Plain-English reasons when not proven. */
   problems: string[];

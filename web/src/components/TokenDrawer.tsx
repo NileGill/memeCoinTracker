@@ -28,7 +28,7 @@ function Driver({ d, max }: { d: AiDriver; max: number }) {
 function AiPanel({ t, drivers }: { t: TokenView; drivers: AiDriver[] | null | undefined }) {
   const model = useStore((s) => s.ml?.model);
   if (!t.ai || !model) return null;
-  const { win, ev, pick } = t.ai;
+  const { win, ev, pick, risk } = t.ai;
   const max = Math.max(...(drivers ?? []).map((d) => Math.abs(d.impact)), 0.001);
   return (
     <div className="panel">
@@ -49,6 +49,15 @@ function AiPanel({ t, drivers }: { t: TokenView; drivers: AiDriver[] | null | un
           )}
           . {pick ? <b className="up">The bot would buy this now.</b> : <span className="muted">Not strong enough for the bot to buy.</span>}
         </div>
+        {risk != null && (
+          <div style={{ fontSize: 13.5 }}>
+            Crash chance: <b className={risk >= (model.crash?.maxRisk ?? 1) ? 'down' : ''}>{Math.round(risk * 100)}%</b>{' '}
+            <span className="muted">
+              (falling 50%+ or vanishing within the hour{model.crash ? `; ${Math.round(model.crash.rate * 100)}% of coins did in testing` : ''})
+              {model.crash?.maxRisk != null && risk > model.crash.maxRisk ? '. Too risky: the bot skips it.' : ''}
+            </span>
+          </div>
+        )}
         {drivers && drivers.length > 0 && (
           <>
             <div className="dim" style={{ fontSize: 12 }}>

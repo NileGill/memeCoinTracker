@@ -234,8 +234,11 @@ interface Candidate {
   rank: number;
 }
 
-/** Coins the model picks, and coins the MemeRadar score likes (used until the model is proven). */
-function candidates(now: number) {
+/**
+ * Coins the model picks, and coins the MemeRadar score likes (used until the model is proven).
+ * Score picks skip coins the crash model rates too likely to crash, once it has shown it can.
+ */
+function candidates(now: number, riskMax: number | null) {
   const model: Candidate[] = [];
   const score: Candidate[] = [];
   for (const info of allEntries()) {
@@ -243,7 +246,8 @@ function candidates(now: number) {
     if (info.hidden || !(v.priceUsd! > 0) || now - info.freshAt > 60_000) continue;
     if ((v.liquidity ?? 0) < ML.tradeMinLiquidity || v.flags.some((f) => f.severity === 'danger')) continue;
     if (v.ai?.pick) model.push({ view: v, rank: (v.ai.ev ?? 0) * 100 + v.ai.win });
-    if (v.score != null && v.score >= 60 && !v.flags.some((f) => RISKY.has(f.code))) score.push({ view: v, rank: v.score });
+    const safeEnough = riskMax == null || (v.ai?.risk != null && v.ai.risk <= riskMax);
+    if (v.score != null && v.score >= 60 && safeEnough && !v.flags.some((f) => RISKY.has(f.code))) score.push({ view: v, rank: v.score });
   }
   model.sort((x, y) => y.rank - x.rank);
   score.sort((x, y) => y.rank - x.rank);
@@ -256,7 +260,7 @@ function tick() {
   if (!sol) return;
   const now = Date.now();
   const model = modelForBot();
-  const lists = candidates(now);
+  const lists = candidates(now, model?.scoreRiskMax ?? null);
   for (const a of accounts.values()) {
     manage(a, now, sol);
     if (now - a.lastCurveAt >= CURVE_EVERY_MS) {
@@ -329,8 +333,8 @@ function activity(a: Account): string {
   const holding = `Holding ${a.positions.length} of ${a.settings.maxOpen}.`;
   if (!strategy) return `Waiting for the AI model to prove itself before trading (you chose "model only"). ${holding}`;
   if (strategy === 'score')
-    return `Trading on the MemeRadar score (${a.settings.scoreMin}+) until the AI model proves itself. ${holding}`;
-  return `Trading the AI model's picks. ${holding}`;
+    return `Trading on the MemeRadar score (${a.settings.scoreMin}+)${model?.scoreRiskMax != null ? ', skipping coins the crash model flags,' : ''} until the AI model proves itself. ${holding}`;
+  return `Trading the AI model's picks (likely winners it doesn't expect to crash). ${holding}`;
 }
 
 export function accountView(a: Account, tradeLimit = 100): PaperAccountView {

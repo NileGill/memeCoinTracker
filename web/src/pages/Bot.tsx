@@ -88,6 +88,11 @@ function ModelPanel({ ml }: { ml: MlStatus | null }) {
             fills at the price actually seen, which is often worse than the stop. It's only called <i>proven</i> (and only
             then does the bot follow it) when those test trades made money. It retrains every few hours as data grows.
             <br />
+            <b>The crash filter.</b> A win-or-lose model can't tell a −15% stop from a rug that falls straight to zero, and rugs
+            gap right through stop-losses. So a second model learns which coins crash 50%+ (or vanish) within the hour, and the bot
+            skips coins it flags, even ones that look like winners. When two settings make about the same money, it picks the one that
+            wins more often.
+            <br />
             <b>What it can't do.</b> Nothing predicts memecoins reliably: insiders, bots and rugs dominate. Expect many
             losing trades even from a good model; the question is whether the winners pay for them.
           </div>
@@ -119,7 +124,19 @@ function ModelResults({ m }: { m: MlModelInfo }) {
           saw).
         </div>
         <StrategyLine label="AI model (test period)" r={m.test} />
+        {m.scoreFiltered && (
+          <StrategyLine label={`MemeRadar score ${m.scoreFiltered.threshold}+ with the crash filter (same period)`} r={m.scoreFiltered} />
+        )}
         {m.baseline && <StrategyLine label={`Plain MemeRadar score ${m.baseline.threshold}+ (same period)`} r={m.baseline} />}
+        {m.crash && (
+          <div className="dim" style={{ fontSize: 12.5 }}>
+            <b>Crash filter:</b> a second model rates each coin's chance of falling 50%+ (or vanishing) within the hour. In the test period{' '}
+            {pct1(m.crash.rate)} of coins crashed, and its crash-spotting skill was {m.crash.auc.toFixed(2)} (0.5 is a coin flip).{' '}
+            {m.crash.maxRisk != null
+              ? `The bot skips any coin with more than a ${Math.round(m.crash.maxRisk * 100)}% crash chance.`
+              : 'It did not improve results yet, so it is not filtering trades.'}
+          </div>
+        )}
         <div className="dim" style={{ fontSize: 12.5 }}>
           Ranking skill {m.auc.toFixed(2)} (0.5 is a coin flip; it can be high just from spotting which coins will move at all, so the trade results above are what count) · {pct1(m.baseRate)} of all test snapshots hit the target ·
           learned from {m.trainRows.toLocaleString()} snapshots of {m.tokens.toLocaleString()} coins

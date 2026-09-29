@@ -35,12 +35,22 @@ export const ML = {
   /** Profit levels (%) and loss levels (%) whose first-hit time is recorded for every snapshot. */
   tpLevels: [10, 20, 30, 50, 100].map((v) => v * scale),
   slLevels: [10, 15, 20, 30, 50].map((v) => v * scale),
-  /** Take-profit / stop-loss pairs the trainer tries; it keeps the one that tests best. */
+  /**
+   * Take-profit / stop-loss pairs the trainer tries; it keeps the one that tests best. Wider stops
+   * get shaken out less (higher win rate); tighter ones cut losers sooner. Must be recorded levels.
+   */
   targets: [
     { tp: 20, sl: 10 },
+    { tp: 20, sl: 20 },
     { tp: 30, sl: 15 },
+    { tp: 30, sl: 30 },
     { tp: 50, sl: 20 },
   ].map((t) => ({ tp: t.tp * scale, sl: t.sl * scale })),
+  /**
+   * When two strategies make about the same money (within this many % per trade), prefer the one
+   * that wins more often.
+   */
+  preferWinRateWithin: 0.5,
 
   /** Assumed cost per buy or sell: pool fee + router fee + slippage on a small order. */
   costPerSide: 0.0125,

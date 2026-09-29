@@ -61,6 +61,12 @@ export interface Obs {
   l1h: number; // pump.fun launches in the last hour
   g1h: number; // graduations in the last hour
   breadth: number | null; // share of tracked coins that are up over 5m
+  // From our own live tracking (added later; older snapshots have them missing):
+  l3: number | null; // % change in liquidity over the last 3 / 10 minutes (liquidity being pulled = rug warning)
+  l10: number | null;
+  h10: number | null; // % change in holders over the last 10 minutes
+  vol10: number | null; // how choppy the price was over the last 10 minutes (std of 15s moves, %)
+  dd10: number | null; // % below the 10-minute high
 }
 
 /** Field order used when snapshots are stored as arrays. Stored batches carry their own copy. */
@@ -68,7 +74,7 @@ export const OBS_FIELDS: (keyof Obs)[] = [
   't', 'mint', 'price', 'mcap', 'fdv', 'liq', 'holders', 'age', 'c5', 'c1h', 'c6h', 'c24h', 'v5', 'v1h', 'v6h', 'v24h',
   'bv5', 'bv1h', 'sv5', 'sv1h', 'b5', 's5', 'b1h', 's1h', 'tr5', 'nb5', 'nb1h', 'hc1h', 'org', 'mintOff', 'frzOff',
   'top', 'dev', 'boosts', 'ver', 'pad', 'dex', 'soc', 'src', 'score', 'sMom', 'sFlow', 'sAcc', 'sPart', 'sQual', 'sPen',
-  'flags', 'tracked', 'r1', 'r3', 'r10', 'sol1h', 'l1h', 'g1h', 'breadth',
+  'flags', 'tracked', 'r1', 'r3', 'r10', 'sol1h', 'l1h', 'g1h', 'breadth', 'l3', 'l10', 'h10', 'vol10', 'dd10',
 ];
 
 // Order matters: stored bitmasks depend on it. Only ever append.
@@ -83,6 +89,16 @@ export interface ObsContext {
   launches1h: number;
   grads1h: number;
   breadth: number | null;
+  /** Liquidity, holder and volatility trends from the recorder's live tape (nulls without enough history). */
+  tapeStats: (mint: string) => TapeStats;
+}
+
+export interface TapeStats {
+  l3: number | null;
+  l10: number | null;
+  h10: number | null;
+  vol10: number | null;
+  dd10: number | null;
 }
 
 /** Round to 5 significant digits: plenty for learning, and it roughly halves storage. */
@@ -103,6 +119,7 @@ export function makeObs(v: TokenView, ctx: ObsContext): Obs | null {
     if (i >= 0) flags |= 1 << i;
   }
   const p = v.scoreParts;
+  const tape = ctx.tapeStats(v.mint);
   return {
     t: ctx.now,
     mint: v.mint,
@@ -159,6 +176,11 @@ export function makeObs(v: TokenView, ctx: ObsContext): Obs | null {
     l1h: ctx.launches1h,
     g1h: ctx.grads1h,
     breadth: sig(ctx.breadth),
+    l3: sig(tape.l3),
+    l10: sig(tape.l10),
+    h10: sig(tape.h10),
+    vol10: sig(tape.vol10),
+    dd10: sig(tape.dd10),
   };
 }
 
@@ -264,6 +286,11 @@ export const FEATURES: FeatureDef[] = [
   { label: 'Launches per hour', get: (o) => o.l1h },
   { label: 'Graduations per hour', get: (o) => o.g1h },
   { label: 'Market mood (coins up)', get: (o) => n(o.breadth) },
+  { label: 'Liquidity change 3m', get: (o) => n(o.l3) },
+  { label: 'Liquidity change 10m', get: (o) => n(o.l10) },
+  { label: 'Holder change 10m', get: (o) => n(o.h10) },
+  { label: 'Price choppiness 10m', get: (o) => n(o.vol10) },
+  { label: 'Drop from 10m high', get: (o) => n(o.dd10) },
 ];
 
 export const NUM_FEATURES = FEATURES.length;
