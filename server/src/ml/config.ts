@@ -46,14 +46,19 @@ export const ML = {
     { tp: 30, sl: 30 },
     { tp: 50, sl: 20 },
   ].map((t) => ({ tp: t.tp * scale, sl: t.sl * scale })),
+  /** Target for the plain-score strategy the bot uses before the AI is proven. */
+  scoreTarget: { tp: 30 * scale, sl: 15 * scale },
   /**
    * When two strategies make about the same money (within this many % per trade), prefer the one
    * that wins more often.
    */
   preferWinRateWithin: 0.5,
 
-  /** Assumed cost per buy or sell: pool fee + router fee + slippage on a small order. */
-  costPerSide: 0.0125,
+  /**
+   * Assumed cost per buy or sell: 1% pool + router fee, plus ~0.5% slippage for a trade of 0.25% of
+   * the pool (the bot's default size cap). Matches what the paper bot actually pays.
+   */
+  costPerSide: 0.015,
   /** What counts as "proven": enough test trades, a real edge after fees, and real skill at ranking. */
   proven: { minTrades: fast ? 5 : 25, minAvgReturn: 1, minAuc: 0.55 },
   /** After the bot sells a coin it waits this long before buying it again (the backtest does the same). */

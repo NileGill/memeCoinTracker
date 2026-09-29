@@ -176,6 +176,10 @@ export interface PaperSettings {
   mode: 'auto' | 'model';
   scoreMin: number;
   minLiquidity: number;
+  /** Never put more than this much SOL into one trade. */
+  maxTradeSol: number;
+  /** Never buy more than this % of a coin's pool liquidity (keeps slippage small). */
+  maxPoolPct: number;
   paused: boolean;
 }
 
@@ -198,6 +202,9 @@ export interface PaperPosition {
   signal: number;
   lastPrice: number;
   lastPriceAt: number;
+  /** Pool liquidity (USD) when bought, and the latest reading. */
+  entryLiquidity?: number;
+  lastLiquidity?: number;
 }
 
 export type PaperExit = 'tp' | 'sl' | 'time' | 'manual' | 'gone' | 'reset';
@@ -218,6 +225,14 @@ export interface PaperTrade {
   reason: PaperExit;
   strategy: PaperStrategy;
   signal: number;
+  entryLiquidity?: number;
+  exitLiquidity?: number;
+}
+
+export interface PaperBucket {
+  trades: number;
+  wins: number;
+  pnlSol: number;
 }
 
 export interface PaperStats {
@@ -250,6 +265,14 @@ export interface PaperAccountView {
   trades: PaperTrade[];
   stats: PaperStats;
   curve: [number, number][];
+  /** The most profitable and the worst trades ever (not just recent ones). */
+  bestTrades: PaperTrade[];
+  worstTrades: PaperTrade[];
+  /** Results split by why trades closed, and by strategy. */
+  byReason: Partial<Record<PaperExit, PaperBucket>>;
+  byStrategy: Partial<Record<PaperStrategy, PaperBucket>>;
+  /** True when these results came from the old, too-generous fill model (before realistic slippage). */
+  legacyFills: boolean;
   /** What the bot is doing right now, in plain English. */
   activity: string;
   readiness: ReadinessCheck[];

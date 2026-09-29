@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { MlModelInfo, MlStatus, PaperAccountView, PaperPosition, PaperSettings, PaperTrade, StrategyResult, TokenView } from '../../../shared/types';
+import type { MlModelInfo, MlStatus, PaperAccountView, PaperBucket, PaperPosition, PaperSettings, PaperTrade, StrategyResult, TokenView } from '../../../shared/types';
 import { Icon } from '../components/Icon';
 import { AiChip, Empty, Pct, TokenIcon, useTick } from '../components/common';
 import { botApi } from '../lib/bot';
@@ -272,7 +272,7 @@ function PaperBot() {
   return <BotDashboard a={bot} />;
 }
 
-const DEFAULTS: PaperSettings = { sizePct: 10, maxOpen: 5, mode: 'auto', scoreMin: 75, minLiquidity: 20_000, paused: false };
+const DEFAULTS: PaperSettings = { sizePct: 10, maxOpen: 5, mode: 'auto', scoreMin: 75, minLiquidity: 20_000, maxTradeSol: 2, maxPoolPct: 0.25, paused: false };
 
 function SettingsFields({ s, onChange }: { s: PaperSettings; onChange: (s: PaperSettings) => void }) {
   const num = (key: keyof PaperSettings, label: string, hint: string, min: number, max: number, step: number, suffix: string) => (
@@ -300,6 +300,8 @@ function SettingsFields({ s, onChange }: { s: PaperSettings; onChange: (s: Paper
       {num('sizePct', 'Trade size', 'Share of the bot’s balance per trade', 1, 50, 1, '%')}
       {num('maxOpen', 'Open trades at once', 'Spreads risk across coins', 1, 20, 1, 'max')}
       {num('minLiquidity', 'Minimum liquidity', 'Skip coins thinner than this', 10_000, 5_000_000, 5_000, 'USD')}
+      {num('maxTradeSol', 'Max per trade', 'Never more than this in one coin', 0.01, 100, 0.1, 'SOL')}
+      {num('maxPoolPct', 'Max share of a coin’s pool', 'Bigger buys move the price against you. 0.25% keeps slippage around 0.5%', 0.05, 2, 0.05, '%')}
       {num('scoreMin', 'Score needed (before the model is proven)', 'MemeRadar score the bot buys at meanwhile', 60, 95, 1, '/100')}
       <label className="field">
         Strategy
@@ -403,7 +405,10 @@ function PositionRow({ p }: { p: PaperPosition }) {
   const [busy, setBusy] = useState(false);
   const price = live ?? p.lastPrice;
   const move = (price / p.entryPrice - 1) * 100;
-  const value = solPrice ? (p.qty * price) / solPrice : null;
+  // What selling now would actually return: capped at the target price, after pool slippage and the 1% fee.
+  const side = (p.lastLiquidity ?? p.entryLiquidity ?? 0) / 2;
+  const usd = p.qty * Math.min(price, p.entryPrice * (1 + p.target.tp / 100));
+  const value = solPrice && side > 0 ? ((usd * side) / (side + usd)) * 0.99 / solPrice : null;
   const left = Math.max(0, p.closeBy - Date.now());
   return (
     <div className="feed-item" onClick={() => openToken(p.mint)}>
@@ -458,7 +463,8 @@ function TradeRow({ t }: { t: PaperTrade }) {
           <span className={`badge ${t.reason === 'tp' ? 'green' : t.reason === 'sl' || t.reason === 'gone' ? 'red' : ''}`}>{REASON[t.reason]}</span>
         </div>
         <div className="meta truncate">
-          {fmtAgo(t.closedAt)} · held {fmtAge(t.openedAt, t.closedAt)} · {t.strategy === 'model' ? 'AI pick' : `score ${t.signal}`}
+          {fmtAgo(t.closedAt)} · held {fmtAge(t.openedAt, t.closedAt)} · {fmtSol(t.costSol)} in
+          {t.entryLiquidity != null && ` · pool ${fmtUsd(t.entryLiquidity)}`} · {t.strategy === 'model' ? 'AI pick' : `score ${t.signal}`}
         </div>
       </div>
       <div className="num" style={{ textAlign: 'right', fontSize: 12.5 }}>
@@ -481,7 +487,9 @@ function BotDashboard({ a }: { a: PaperAccountView }) {
   const [restart, setRestart] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const [tab, setTab] = useState<'recent' | 'best' | 'worst'>('recent');
   const s = a.stats;
+  const list = tab === 'best' ? a.bestTrades : tab === 'worst' ? a.worstTrades : a.trades;
   if (restart) return <StartForm restart={a} onDone={() => setRestart(false)} />;
 
   const save = async (settings: Partial<PaperSettings>) => {
@@ -508,6 +516,15 @@ function BotDashboard({ a }: { a: PaperAccountView }) {
           </button>
         </div>
         <div className="panel-body col" style={{ gap: 12 }}>
+          {a.legacyFills && (
+            <div className="notice amber">
+              <b>These results are overstated.</b> They were made before trades paid realistic slippage: the bot could "sell" big positions
+              into nearly empty pools and cash in on momentary price spikes, which real trades can't. Start over to see realistic results.{' '}
+              <button className="btn xs" style={{ marginLeft: 6 }} onClick={() => setRestart(true)}>
+                Start over
+              </button>
+            </div>
+          )}
           <div className={`notice ${a.settings.paused ? 'amber' : ''}`}>{a.activity}</div>
           <div className="kpis bot-kpis">
             <Stat k="Balance" v={fmtSol(a.equity)} hint={solPrice ? `≈ ${fmtUsd(a.equity * solPrice)} · started ${fmtSol(a.startBalance)}` : `started ${fmtSol(a.startBalance)}`} />
@@ -515,12 +532,13 @@ function BotDashboard({ a }: { a: PaperAccountView }) {
             <Stat k="Win rate" v={s.winRate != null ? `${Math.round(s.winRate * 100)}%` : '—'} hint={`${s.wins} of ${s.closed} trades`} />
             <Stat k="Average trade" v={s.avgTradePct != null ? fmtPct(s.avgTradePct) : '—'} cls={pctClass(s.avgTradePct)} hint="after fees" />
             <Stat k="Profit factor" v={s.profitFactor != null ? s.profitFactor.toFixed(2) : '—'} hint="won ÷ lost (over 1 = profit)" />
-            <Stat k="Worst drawdown" v={`${s.maxDrawdownPct}%`} hint={`fees paid ${fmtSol(s.feesSol)}`} />
+            <Stat k="Worst drawdown" v={`${s.maxDrawdownPct}%`} hint={`fees & slippage ${fmtSol(s.feesSol)}`} />
           </div>
           <EquityChart a={a} />
           <div className="dim" style={{ fontSize: 12 }}>
-            Running since {fmtWhen(a.createdAt)}. Cash {fmtSol(a.cash)}. Every fill pays a 1% fee, slippage based on the coin's liquidity
-            and a network fee; stops fill at the price actually seen.
+            Running since {fmtWhen(a.createdAt)}. Cash {fmtSol(a.cash)}. Every buy and sell pays a 1% fee, a network fee and slippage from
+            the coin's pool size; trades are capped at {a.settings.maxPoolPct}% of a pool and {fmtSol(a.settings.maxTradeSol)}; targets fill at the
+            target price, never at a spike; stops fill at the price actually seen.
           </div>
         </div>
       </section>
@@ -549,22 +567,37 @@ function BotDashboard({ a }: { a: PaperAccountView }) {
               <Icon name="clock" size={15} /> Closed trades
             </h2>
             <span className="sub">{s.closed} total</span>
+            <span className="spacer" />
+            <span className="seg">
+              {(['recent', 'best', 'worst'] as const).map((k) => (
+                <button
+                  key={k}
+                  className={tab === k ? 'on' : ''}
+                  onClick={() => setTab(k)}
+                  title={k === 'recent' ? 'Latest trades' : k === 'best' ? 'Most profitable trades ever' : 'Biggest losses ever'}
+                >
+                  {k === 'recent' ? 'Recent' : k === 'best' ? 'Best' : 'Worst'}
+                </button>
+              ))}
+            </span>
           </div>
           <div className="feed" style={{ maxHeight: 520, overflowY: 'auto' }}>
-            {(showAll ? a.trades : a.trades.slice(0, 25)).map((t) => (
+            {(showAll || tab !== 'recent' ? list : list.slice(0, 25)).map((t) => (
               <TradeRow key={t.id} t={t} />
             ))}
-            {!a.trades.length && <Empty>No finished trades yet.</Empty>}
-            {!showAll && a.trades.length > 25 && (
+            {!list.length && <Empty>No finished trades yet.</Empty>}
+            {tab === 'recent' && !showAll && list.length > 25 && (
               <div style={{ padding: 10, textAlign: 'center' }}>
                 <button className="btn sm" onClick={() => setShowAll(true)}>
-                  Show all {a.trades.length}
+                  Show all {list.length}
                 </button>
               </div>
             )}
           </div>
         </section>
       </div>
+
+      <Breakdown a={a} />
 
       <section className="panel">
         <div className="panel-head">
@@ -593,8 +626,8 @@ function BotDashboard({ a }: { a: PaperAccountView }) {
             </>
           ) : (
             <div className="dim">
-              {a.settings.sizePct}% of the balance per trade · up to {a.settings.maxOpen} at once · coins with {fmtUsd(a.settings.minLiquidity)}+
-              liquidity · {a.settings.mode === 'auto' ? `score ${a.settings.scoreMin}+ until the AI is proven, then the AI` : 'AI picks only'}
+              {a.settings.sizePct}% of the balance per trade, at most {fmtSol(a.settings.maxTradeSol)} and {a.settings.maxPoolPct}% of a coin's pool · up
+              to {a.settings.maxOpen} at once · coins with {fmtUsd(a.settings.minLiquidity)}+ liquidity · {a.settings.mode === 'auto' ? `score ${a.settings.scoreMin}+ until the AI is proven, then the AI` : 'AI picks only'}
             </div>
           )}
           {msg && <div className="notice red">{msg}</div>}
@@ -617,6 +650,65 @@ function BotDashboard({ a }: { a: PaperAccountView }) {
 
       <Readiness a={a} />
     </>
+  );
+}
+
+const REASON_LABEL: Record<string, string> = {
+  tp: 'Hit the target',
+  sl: 'Hit the stop',
+  time: 'Sold at the time limit',
+  manual: 'Sold by you',
+  gone: 'Rugged / price vanished',
+  reset: 'Reset',
+};
+
+function BucketRow({ label, b }: { label: string; b: PaperBucket }) {
+  return (
+    <div className="bot-bucket">
+      <span>{label}</span>
+      <span className="num dim">{b.trades} trades</span>
+      <span className="num dim">{b.trades ? `${Math.round((b.wins / b.trades) * 100)}% won` : '—'}</span>
+      <span className={`num ${pctClass(b.pnlSol)}`}>
+        {b.pnlSol > 0 ? '+' : ''}
+        {fmtSol(b.pnlSol)}
+      </span>
+    </div>
+  );
+}
+
+/** Where the profit and loss came from: by how trades ended, and by strategy. */
+function Breakdown({ a }: { a: PaperAccountView }) {
+  const reasons = Object.entries(a.byReason).filter(([, b]) => b && b.trades > 0) as [string, PaperBucket][];
+  const strategies = Object.entries(a.byStrategy).filter(([, b]) => b && b.trades > 0) as [string, PaperBucket][];
+  if (!reasons.length) return null;
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <h2>
+          <Icon name="bars" size={15} /> Where the profit came from
+        </h2>
+      </div>
+      <div className="panel-body bot-breakdown">
+        <div className="col" style={{ gap: 4 }}>
+          <div className="dim" style={{ fontSize: 12, fontWeight: 650 }}>
+            How trades ended
+          </div>
+          {reasons
+            .sort((x, y) => y[1].pnlSol - x[1].pnlSol)
+            .map(([k, b]) => (
+              <BucketRow key={k} label={REASON_LABEL[k] ?? k} b={b} />
+            ))}
+        </div>
+        <div className="col" style={{ gap: 4 }}>
+          <div className="dim" style={{ fontSize: 12, fontWeight: 650 }}>
+            By strategy
+          </div>
+          {strategies.map(([k, b]) => (
+            <BucketRow key={k} label={k === 'model' ? 'AI picks' : 'MemeRadar score'} b={b} />
+          ))}
+        </div>
+      </div>
+    </section>
   );
 }
 

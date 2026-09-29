@@ -35,6 +35,8 @@ function cleanSettings(input: unknown, base: PaperSettings): PaperSettings {
     mode,
     scoreMin: Math.round(numIn('scoreMin', 60, 95, 'Score minimum')),
     minLiquidity: numIn('minLiquidity', ML.tradeMinLiquidity, 5_000_000, 'Minimum liquidity'),
+    maxTradeSol: numIn('maxTradeSol', 0.01, 100, 'Max per trade'),
+    maxPoolPct: numIn('maxPoolPct', 0.05, 2, 'Max share of a pool'),
     paused,
   };
 }

@@ -2319,3 +2319,32 @@ img.ticon.loaded {
     grid-column: 2;
   }
 }
+
+.bot-breakdown {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+.bot-bucket {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) 1fr 1fr 1fr;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+.bot-bucket > span:not(:first-child) {
+  text-align: right;
+}
+@media (max-width: 1100px) {
+  .bot-breakdown {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 600px) {
+  .bot-bucket {
+    grid-template-columns: minmax(0, 1.4fr) 0.8fr 0.9fr 1fr;
+    font-size: 12.5px;
+  }
+}

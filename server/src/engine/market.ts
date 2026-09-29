@@ -471,11 +471,27 @@ export interface EntryInfo {
   /** Last time a price source returned data for this coin. */
   freshAt: number;
   hidden: boolean;
+  /**
+   * The lower of DexScreener's and Jupiter's liquidity readings (USD), so one source's glitch can't
+   * make a thin pool look deep. Null when neither reports it.
+   */
+  liquidityLow: number | null;
+  /** Both sources report liquidity and disagree by more than 3x: the numbers can't be trusted. */
+  liquidityConflict: boolean;
 }
 
 function info(e: Entry): EntryInfo | null {
   if (!e.view) return null;
-  return { view: e.view, freshAt: Math.max(e.ds ? e.dsAt : 0, e.jup ? e.jupAt : 0), hidden: e.hidden };
+  const ds = num(e.ds?.liquidity?.usd);
+  const jup = num(e.jup?.liquidity);
+  const both = ds != null && jup != null && ds > 0 && jup > 0;
+  return {
+    view: e.view,
+    freshAt: Math.max(e.ds ? e.dsAt : 0, e.jup ? e.jupAt : 0),
+    hidden: e.hidden,
+    liquidityLow: both ? Math.min(ds, jup) : (ds ?? jup ?? null),
+    liquidityConflict: both && Math.max(ds, jup) / Math.min(ds, jup) > 3,
+  };
 }
 
 /** A coin's latest view and data freshness, including coins followed in the background. */
