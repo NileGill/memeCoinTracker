@@ -31,6 +31,8 @@ const CRASH_LEVEL = ML.slLevels.length - 1;
 interface SavedModel {
   v: 3;
   schema: number;
+  /** Cost per side the test charged; a model tested at a different cost is retrained. */
+  cost: number;
   featureLabels: string[];
   gbdt: GbdtModel;
   crash: GbdtModel | null;
@@ -463,6 +465,7 @@ async function train() {
     current = {
       v: 3,
       schema: ML.schema,
+      cost: ML.costPerSide,
       featureLabels: FEATURE_LABELS,
       gbdt: best.gbdt,
       crash: crashUsable ? crashModel : null,
@@ -611,6 +614,7 @@ export async function startModel() {
     const saved = await kvGet<SavedModel>(ML.modelKey);
     if (
       saved?.v === 3 &&
+      saved.cost === ML.costPerSide &&
       saved.schema === ML.schema &&
       JSON.stringify(saved.featureLabels) === JSON.stringify(FEATURE_LABELS) &&
       saved.gbdt?.trees?.length
