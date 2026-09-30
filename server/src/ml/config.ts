@@ -20,9 +20,9 @@ export const ML = {
   minRows: fast ? 200 : 3_000,
   minSpanMs: fast ? 30 * 60_000 : 12 * 3_600_000,
   /** Most recent snapshots kept in memory for training. */
-  maxRows: 100_000,
+  maxRows: 300_000,
   /** Days of stored snapshots loaded at startup / kept in the database. */
-  loadDays: 7,
+  loadDays: 10,
   retentionDays: 14,
   schema: fast ? 1001 : 1,
   modelKey: fast ? 'ml:model:fast' : 'ml:model',

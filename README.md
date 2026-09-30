@@ -79,7 +79,7 @@ Memecoins are extremely risky. Most go to zero, and on-chain trades are final.
 
 **Where the data comes from.** No free source offers the full history of a memecoin's buyers, sellers, liquidity and holders, so the server records its own. Every tracked coin with $5K+ liquidity is snapshotted when it appears and every 15 minutes after: about 55 numbers covering price moves, volume, buy pressure, wallets, holders, liquidity, safety checks, launchpad, how long it has been tracked, and the wider market. Each snapshot's price is then followed for an hour, recording when it first reached +10/20/30/50/100% and -10/15/20/30/50%. Coins that drop off the lists keep being followed in the background, so rugs count as losses instead of vanishing. Finished snapshots are saved to Postgres hourly (kept 14 days) and reloaded after a restart.
 
-**How it learns.** Gradient-boosted decision trees (`server/src/ml/gbdt.ts`, written from scratch so the free server needs nothing extra), trained in short bursts so the site stays responsive. Every 4 hours it retrains on up to 100,000 recent snapshots, split by time:
+**How it learns.** Gradient-boosted decision trees (`server/src/ml/gbdt.ts`, written from scratch so the free server needs nothing extra), trained in short bursts so the site stays responsive. Every 4 hours it retrains on up to 300,000 recent snapshots (about 10 days), split by time:
 
 - the oldest 70% to learn from
 - the next 15% to choose the target (+20/-10, +30/-15 or +50/-20) and how picky to be
