@@ -166,7 +166,7 @@ export function TokenTable({
             >
               {presorted && <option value="">Best first</option>}
               {sortable.map((c) => (
-                <option key={c} value={`${c}:d`}>
+                <option key={c} value={c === 'age' ? 'age:a' : `${c}:d`}>
                   {c === 'age' ? 'Newest' : c === 'ai' ? 'AI rating (high to low)' : `${COLS[c].label} (high to low)`}
                 </option>
               ))}

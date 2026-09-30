@@ -7,7 +7,7 @@ import { decodeObs, encodeObs, featurize, hasDanger, makeObs, NUM_FEATURES, OBS_
 /*
  * The model's training data, collected by MemeRadar itself. No free source offers the full
  * history of a memecoin's buyers, sellers, liquidity and holders, so every tracked coin is
- * snapshotted when it appears and every 15 minutes after, and each snapshot's price is then
+ * snapshotted when it appears and every 10 minutes after, and each snapshot's price is then
  * followed for an hour to record what actually happened: which profit and loss levels it hit
  * first, and when. Coins that rug are followed to the end, so losses aren't quietly dropped.
  */
@@ -366,6 +366,9 @@ const mintIds = new Map<string, number>();
 /** While the data is being loaded or a model is training, new rows wait here. */
 let busy = 0;
 const waiting: { obs: Obs; out: Outcome }[] = [];
+/** Earliest and latest snapshot time in `data` (kept up to date so status checks don't scan every row). */
+let tMin = Infinity;
+let tMax = -Infinity;
 
 function writeRow(obs: Obs, out: Outcome) {
   if (data.n >= CAP) {
@@ -380,9 +383,17 @@ function writeRow(obs: Obs, out: Outcome) {
     data.danger.copyWithin(0, drop, data.n);
     data.score.copyWithin(0, drop, data.n);
     data.n = keep;
+    tMin = Infinity;
+    tMax = -Infinity;
+    for (let k = 0; k < keep; k++) {
+      if (data.t[k] < tMin) tMin = data.t[k];
+      if (data.t[k] > tMax) tMax = data.t[k];
+    }
   }
   const i = data.n++;
   data.t[i] = obs.t;
+  if (obs.t < tMin) tMin = obs.t;
+  if (obs.t > tMax) tMax = obs.t;
   let id = mintIds.get(obs.mint);
   if (id === undefined) mintIds.set(obs.mint, (id = mintIds.size));
   data.mint[i] = id;
@@ -532,6 +543,13 @@ export async function flushSnapshots() {
     if (Date.now() - lastRetention > 24 * 3_600_000) {
       lastRetention = Date.now();
       await db.query(`delete from ml_batches where created_at < now() - make_interval(days => $1)`, [ML.retentionDays]);
+      // The free database is small: beyond this many snapshots, drop the oldest batches too.
+      await db.query(
+        `delete from ml_batches where id in (
+           select id from (select id, sum(n) over (order by id desc) as upto from ml_batches where schema = $1) s where upto > $2
+         )`,
+        [ML.schema, ML.maxStoredRows],
+      );
       await refreshStoredCount();
     }
   } catch (e) {
@@ -544,13 +562,8 @@ export async function flushSnapshots() {
 // ---------------------------------------------------------------- status & start
 
 export function recorderStatus() {
-  let from: number | null = null;
-  let to: number | null = null;
-  for (let i = 0; i < data.n; i++) {
-    if (from === null || data.t[i] < from) from = data.t[i];
-    if (to === null || data.t[i] > to) to = data.t[i];
-  }
-  return { samples: data.n + waiting.length, pending: open.length, stored, dataFrom: from, dataTo: to, loaded };
+  const has = data.n > 0;
+  return { samples: data.n + waiting.length, pending: open.length, stored, dataFrom: has ? tMin : null, dataTo: has ? tMax : null, loaded };
 }
 
 let started = false;

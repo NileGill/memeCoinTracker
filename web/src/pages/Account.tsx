@@ -198,7 +198,7 @@ function SessionsSection() {
         >
           <b>Delete your account permanently?</b>
           <span>
-            Your saved settings, watchlist, traders and trade history on the account are erased. This can't be undone. Your
+            Your saved settings, watchlist, traders, trade history and paper trading bot on the account are erased. This can't be undone. Your
             wallet and coins are not affected.
           </span>
           <input

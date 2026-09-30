@@ -78,7 +78,7 @@ function ModelPanel({ ml }: { ml: MlStatus | null }) {
             (for example +30%) before a stop-loss (for example −15%) within an hour?
             <br />
             <b>What it learns from.</b> No free source has the full history of memecoin buyers, sellers, liquidity and
-            holders, so MemeRadar records it: every coin it tracks is snapshotted when it appears and every 15 minutes
+            holders, so MemeRadar records it: every coin it tracks is snapshotted when it appears and every 10 minutes
             after (price moves, volume, buy pressure, wallets, holders, liquidity, safety checks, launchpad, how the market
             is doing), and each snapshot's price is followed for an hour to see what actually happened. Coins that rug are
             followed to the end, so losses count.
@@ -405,10 +405,10 @@ function PositionRow({ p }: { p: PaperPosition }) {
   const [busy, setBusy] = useState(false);
   const price = live ?? p.lastPrice;
   const move = (price / p.entryPrice - 1) * 100;
-  // What selling now would actually return: capped at the target price, after pool slippage and the 1% fee.
+  // What selling now would actually return: capped at the target price, after pool slippage, the 1% fee and the network fee.
   const side = (p.lastLiquidity ?? p.entryLiquidity ?? 0) / 2;
   const usd = p.qty * Math.min(price, p.entryPrice * (1 + p.target.tp / 100));
-  const value = solPrice && side > 0 ? ((usd * side) / (side + usd)) * 0.99 / solPrice : null;
+  const value = solPrice && side > 0 ? Math.max(0, (((usd * side) / (side + usd)) * 0.99) / solPrice - 0.0005) : null;
   const left = Math.max(0, p.closeBy - Date.now());
   if (p.pending)
     return (

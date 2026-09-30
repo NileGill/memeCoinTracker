@@ -137,8 +137,8 @@ export function TradePanel({ token, initialSide }: { token: TokenView; initialSi
       const freshImpact = impactPct(order);
       if (freshImpact !== null && freshImpact > 15 && !impactAck)
         throw new Error(`Price impact jumped to ${freshImpact.toFixed(1)}%. Review the quote and confirm again.`);
-      const result = await signAndExecute(order, { inputMint, outputMint, amount: amountRaw.toString(), taker });
-      setPhase('sending');
+      // "Sending…" while Jupiter lands the signed transaction.
+      const result = await signAndExecute(order, { inputMint, outputMint, amount: amountRaw.toString(), taker }, () => setPhase('sending'));
       if (result.status === 'Success' && result.signature) {
         setSignature(result.signature);
         setPhase('done');

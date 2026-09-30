@@ -412,6 +412,8 @@ export function registerHold(fn: HoldFn, strong: boolean) {
   (strong ? strongHolds : weakHolds).push(fn);
 }
 const heldStrong = (mint: string) => strongHolds.some((f) => f(mint));
+/** Background-followed coins dropped because too many piled up (their open model snapshots lose their outcome). */
+let hiddenEvicted = 0;
 const held = (mint: string) => heldStrong(mint) || weakHolds.some((f) => f(mint));
 
 /** Start following a coin's price without listing it (e.g. an open bot trade after a restart). */
@@ -463,6 +465,7 @@ function prune() {
   if (hidden.length > MAX_HIDDEN) {
     hidden.sort((a, b) => a.firstSeen - b.firstSeen);
     for (const e of hidden.slice(0, hidden.length - MAX_HIDDEN)) entries.delete(e.mint);
+    hiddenEvicted += hidden.length - MAX_HIDDEN;
   }
 }
 
@@ -507,6 +510,13 @@ export function allEntries(): EntryInfo[] {
     if (i) out.push(i);
   }
   return out;
+}
+
+/** How many coins are listed and followed in the background (for the health check). */
+export function marketSize() {
+  let hidden = 0;
+  for (const e of entries.values()) if (e.hidden) hidden++;
+  return { listed: entries.size - hidden, hidden, hiddenEvicted };
 }
 
 /** Launches and graduations in the last hour. */

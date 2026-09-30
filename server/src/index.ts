@@ -4,7 +4,7 @@ import compression from 'compression';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Holding, HoldingsResponse, Snapshot, TokenDetail } from '../../shared/types';
 import { authRouter, sessionUserId, startAuth } from './auth/routes';
-import { accountView, getAccount, savePaper, startPaper } from './bot/paper';
+import { accountView, getAccount, savePaper, startPaper, stopPaper } from './bot/paper';
 import { botRouter } from './bot/routes';
 import { config, SOL_MINT } from './config';
 import {
@@ -13,6 +13,7 @@ import {
   getView,
   launchList,
   marketPayload,
+  marketSize,
   migrationList,
   keepWatching,
   onMigration,
@@ -155,6 +156,7 @@ app.get('/api/health', (_req, res) => {
     memoryMb: { rss: Math.round(mem.rss / 1e6), heap: Math.round(mem.heapUsed / 1e6) },
     cpuS: Math.round((cpu.user + cpu.system) / 1e6),
     ml: { samples: ml.samples, pending: ml.pending, stored: ml.stored, state: mlStatus().state },
+    market: marketSize(),
     status: allStatus(),
   });
 });
@@ -393,6 +395,7 @@ const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
   saveNow();
+  stopPaper(); // no trades after the final save
   // Warm-restart cache, finished model snapshots and paper accounts, all written once per shutdown.
   const within = (p: Promise<unknown>, ms: number) => Promise.race([p, new Promise((r) => setTimeout(r, ms))]);
   await Promise.all([persistAll(), within(flushSnapshots(), 12_000), within(savePaper(), 12_000)]);

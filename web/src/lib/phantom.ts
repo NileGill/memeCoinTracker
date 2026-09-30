@@ -161,7 +161,7 @@ export interface SwapExpectation {
  * Check the order matches what the user asked for, have Phantom sign it (the user approves
  * in the Phantom popup), then let Jupiter land it. Keys never leave Phantom.
  */
-export async function signAndExecute(order: UltraOrder, expect: SwapExpectation): Promise<UltraExecuteResult> {
+export async function signAndExecute(order: UltraOrder, expect: SwapExpectation, onSigned?: () => void): Promise<UltraExecuteResult> {
   const p = getPhantom();
   if (!p) throw new Error('Phantom is not available.');
   if (!p.publicKey || p.publicKey.toString() !== expect.taker) throw new Error('The connected Phantom account changed. Reconnect and try again.');
@@ -181,6 +181,7 @@ export async function signAndExecute(order: UltraOrder, expect: SwapExpectation)
   } catch (e) {
     throw new Error(errorText(e));
   }
+  onSigned?.();
   return api.execute(bytesToB64(signed.serialize()), order.requestId);
 }
 

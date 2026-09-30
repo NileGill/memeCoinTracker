@@ -37,6 +37,7 @@ function Search() {
   // On phones the search box is an icon that opens a full-width bar.
   const [expanded, setExpanded] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const searchSeq = useRef(0);
   const ref = useOutsideClose(open || expanded, () => {
     setOpen(false);
     if (!q) setExpanded(false);
@@ -58,20 +59,24 @@ function Search() {
 
   useEffect(() => {
     const query = q.trim();
+    // Answers to an older query (typing is faster than the network) are ignored.
+    const seq = ++searchSeq.current;
     if (query.length < 2) {
       setResults([]);
+      setLoading(false);
       return;
     }
     setLoading(true);
     const id = setTimeout(async () => {
       try {
         const r = await api.search(query);
+        if (seq !== searchSeq.current) return;
         setResults(r);
         setHl(0);
       } catch {
-        setResults([]);
+        if (seq === searchSeq.current) setResults([]);
       } finally {
-        setLoading(false);
+        if (seq === searchSeq.current) setLoading(false);
       }
     }, 300);
     return () => clearTimeout(id);

@@ -9,6 +9,7 @@ import {
   DEFAULT_PAPER_SETTINGS,
   deleteAccount,
   getAccount,
+  paperFull,
   paperReady,
   savePaper,
   updateSettings,
@@ -75,8 +76,9 @@ export function botRouter() {
         if (typeof start !== 'number' || !Number.isFinite(start) || start < 0.1 || start > 10_000)
           throw new HttpError(400, 'Starting balance must be between 0.1 and 10,000 SOL.');
         const settings = cleanSettings(req.body?.settings, getAccount(req.user!.id)?.settings ?? DEFAULT_PAPER_SETTINGS);
+        if (paperFull(req.user!.id)) throw new HttpError(503, 'The paper trading server is full right now. Try again later.');
         const a = createAccount(req.user!.id, Math.round(start * 1e4) / 1e4, settings);
-        await savePaper(req.user!.id);
+        await savePaper(req.user!.id, { force: true });
         return { account: accountView(a) };
       },
       { auth: true },
@@ -91,7 +93,7 @@ export function botRouter() {
         const a = getAccount(req.user!.id);
         if (!a) throw new HttpError(404, 'Start a paper account first.');
         updateSettings(a, cleanSettings(req.body?.settings, a.settings));
-        await savePaper(req.user!.id);
+        await savePaper(req.user!.id, { force: true });
         return { account: accountView(a) };
       },
       { auth: true },
@@ -106,7 +108,7 @@ export function botRouter() {
         const a = getAccount(req.user!.id);
         const id = req.body?.positionId;
         if (!a || typeof id !== 'string' || !closeManually(a, id)) throw new HttpError(404, 'That position is already closed.');
-        await savePaper(req.user!.id);
+        await savePaper(req.user!.id, { force: true });
         return { account: accountView(a) };
       },
       { auth: true },

@@ -110,7 +110,8 @@ async function poll(feed: Feed) {
       const it = raw as unknown as Record<string, unknown>;
       const link = String(it.link ?? '').trim();
       const title = stripHtml(String(it.title ?? ''));
-      if (!link || !title) continue;
+      // Only ordinary web links (a feed could carry anything, and the site renders these as links).
+      if (!/^https?:\/\//i.test(link) || !title) continue;
       const id = createHash('sha1').update(link.replace(/[?#].*$/, '')).digest('hex').slice(0, 16);
       if (items.has(id)) continue;
       const published = Date.parse(String(it.isoDate ?? it.pubDate ?? '')) || Date.now();

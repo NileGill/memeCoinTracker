@@ -9,7 +9,7 @@ const scale = fast ? 0.1 : 1; // fast mode uses 10x smaller price moves so outco
 export const ML = {
   fast,
   /** Take a snapshot of each coin this often (and once as soon as it appears). */
-  sampleEveryMs: fast ? 30_000 : 15 * 60_000,
+  sampleEveryMs: fast ? 30_000 : 10 * 60_000,
   /** How long after a snapshot its outcome is followed. Also the longest a trade is held. */
   horizonMs: fast ? 4 * 60_000 : 60 * 60_000,
   /** Finished snapshots are written to the database this often (and at shutdown). */
@@ -19,11 +19,16 @@ export const ML = {
   /** Minimum finished snapshots, and hours they must span, before the first training. */
   minRows: fast ? 200 : 3_000,
   minSpanMs: fast ? 30 * 60_000 : 12 * 3_600_000,
-  /** Most recent snapshots kept in memory for training. */
+  /**
+   * Most recent snapshots kept in memory for training (about a week at ~45,000 a day). 300,000 rows
+   * take ~140MB and train in minutes on the free server's 512MB / 0.1 CPU.
+   */
   maxRows: 300_000,
   /** Days of stored snapshots loaded at startup / kept in the database. */
   loadDays: 10,
   retentionDays: 14,
+  /** Never store more than this many (~200 bytes each), whatever their age: the free database holds 512MB. */
+  maxStoredRows: 1_000_000,
   schema: fast ? 1001 : 1,
   modelKey: fast ? 'ml:model:fast' : 'ml:model',
 

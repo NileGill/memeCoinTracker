@@ -47,11 +47,18 @@ function AiPanel({ t, drivers }: { t: TokenView; drivers: AiDriver[] | null | un
               , averaging <span className={pctClass(ev)}>{fmtPct(ev)}</span> after fees
             </>
           )}
-          . {pick ? <b className="up">The bot would buy this now.</b> : <span className="muted">Not strong enough for the bot to buy.</span>}
+          .{' '}
+          {pick ? (
+            <b className="up">The bot would buy this now.</b>
+          ) : model.proven ? (
+            <span className="muted">Not strong enough for the bot to buy.</span>
+          ) : (
+            <span className="muted">The bot doesn't follow the AI until it passes its test.</span>
+          )}
         </div>
         {risk != null && (
           <div style={{ fontSize: 13.5 }}>
-            Crash chance: <b className={risk >= (model.crash?.maxRisk ?? 1) ? 'down' : ''}>{Math.round(risk * 100)}%</b>{' '}
+            Crash chance: <b className={model.crash?.maxRisk != null && risk > model.crash.maxRisk ? 'down' : ''}>{Math.round(risk * 100)}%</b>{' '}
             <span className="muted">
               (falling 50%+ or vanishing within the hour{model.crash ? `; ${Math.round(model.crash.rate * 100)}% of coins did in testing` : ''})
               {model.crash?.maxRisk != null && risk > model.crash.maxRisk ? '. Too risky: the bot skips it.' : ''}
@@ -73,6 +80,23 @@ function AiPanel({ t, drivers }: { t: TokenView; drivers: AiDriver[] | null | un
       </div>
     </div>
   );
+}
+
+/**
+ * A coin's own links are written by whoever launched it: only ever link to plain web pages
+ * (never "javascript:" or other schemes). Bare "t.me/…" style links get https added.
+ */
+function webLink(u: string | undefined): string | undefined {
+  if (!u) return undefined;
+  const raw = u.trim();
+  const bareDomain = /^[\w-]+(\.[\w-]+)+(\/|$)/.test(raw);
+  if (!bareDomain && !/^https?:\/\//i.test(raw)) return undefined;
+  try {
+    const url = new URL(bareDomain ? `https://${raw}` : raw);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function Stat({ k, v, cls }: { k: string; v: string; cls?: string }) {
@@ -329,18 +353,18 @@ export function TokenDrawer() {
             )}
 
             <div className="links" style={{ marginBottom: 8 }}>
-              {t.links.website && (
-                <a href={t.links.website} target="_blank" rel="noreferrer">
+              {webLink(t.links.website) && (
+                <a href={webLink(t.links.website)} target="_blank" rel="noreferrer">
                   <Icon name="globe" size={13} /> Website
                 </a>
               )}
-              {t.links.twitter && (
-                <a href={t.links.twitter} target="_blank" rel="noreferrer">
+              {webLink(t.links.twitter) && (
+                <a href={webLink(t.links.twitter)} target="_blank" rel="noreferrer">
                   <Icon name="xlogo" size={12} /> X
                 </a>
               )}
-              {t.links.telegram && (
-                <a href={t.links.telegram} target="_blank" rel="noreferrer">
+              {webLink(t.links.telegram) && (
+                <a href={webLink(t.links.telegram)} target="_blank" rel="noreferrer">
                   <Icon name="send" size={13} /> Telegram
                 </a>
               )}

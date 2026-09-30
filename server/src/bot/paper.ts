@@ -380,7 +380,7 @@ function candidates(now: number, riskMax: number | null) {
 }
 
 function tick() {
-  if (!ready || !accounts.size) return;
+  if (!ready || stopping || !accounts.size) return;
   const sol = getSolPrice();
   if (!sol) return;
   const now = Date.now();
@@ -509,6 +509,11 @@ export function paperReady() {
   return ready;
 }
 
+/** No room for another account (an existing one can always start over). */
+export function paperFull(userId: string) {
+  return !accounts.has(userId) && accounts.size >= MAX_ACCOUNTS;
+}
+
 export function createAccount(userId: string, startBalance: number, settings: PaperSettings): Account {
   if (!accounts.has(userId) && accounts.size >= MAX_ACCOUNTS) throw new Error('The paper trading server is full right now.');
   const now = Date.now();
@@ -559,33 +564,122 @@ export function closeManually(a: Account, positionId: string): boolean {
   return true;
 }
 
-export async function deleteAccount(userId: string) {
+export function deleteAccount(userId: string): Promise<void> {
   accounts.delete(userId);
   dirty.delete(userId);
-  await db?.query(`delete from paper_accounts where user_id = $1`, [userId]);
+  versions.delete(userId);
+  // After any save already under way, so that save can't bring the row back.
+  return serial(async () => {
+    await db?.query(`delete from paper_accounts where user_id = $1`, [userId]);
+  });
 }
 
 // ---------------------------------------------------------------- persistence
+
+/*
+ * During a deploy the new server starts (and loads every account) while the old one is still
+ * running; the old one saves its latest state only when it's told to stop, a little later. So
+ * each saved row carries a version: a routine save only overwrites the version this server last
+ * saw, and for the first minutes after starting, this server checks for newer versions and takes
+ * them over. Otherwise the old server's final trades would be lost, or both would trade the same
+ * account for an hour.
+ */
+
+/** The row version (and save time) each account was last loaded or saved at. Missing = never saved. */
+const versions = new Map<string, { version: number; at: number }>();
+let stopping = false;
+
+/** Saves and sync checks run one at a time, so a check never mistakes this server's own save for another's. */
+let io: Promise<unknown> = Promise.resolve();
+function serial<T>(fn: () => Promise<T>): Promise<T> {
+  const run = io.then(fn, fn);
+  io = run.catch(() => undefined);
+  return run;
+}
 
 function serialize(a: Account) {
   const { userId: _u, missingSince: _m, ...rest } = a;
   return rest;
 }
 
-/** Save changed accounts (hourly, after user actions, and at shutdown). */
-export async function savePaper(onlyUser?: string) {
+type StoredAccount = Omit<Account, 'userId'>;
+
+/** Rebuild an account from its saved state (null if the state is unusable). */
+function fromStored(userId: string, s: StoredAccount | null): Account | null {
+  if (!s || typeof s.cash !== 'number' || !Array.isArray(s.positions)) return null;
+  const a: Account = {
+    ...s,
+    userId,
+    settings: { ...DEFAULT_PAPER_SETTINGS, ...s.settings },
+    cooldown: s.cooldown ?? {},
+    missingSince: {},
+    totals: s.totals ?? { closed: 0, wins: 0, sumPct: 0, winSol: 0, lossSol: 0, best: null, worst: null },
+  };
+  upgrade(a);
+  return a;
+}
+
+/** Replace this server's copy of an account with the saved one (or drop it if it's gone). */
+async function reloadAccount(userId: string) {
+  if (!db) return;
+  const { rows } = await db.query<{ state: StoredAccount; version: string; at: number }>(
+    `select state, version, extract(epoch from updated_at) * 1000 as at from paper_accounts where user_id = $1`,
+    [userId],
+  );
+  const row = rows[0];
+  dirty.delete(userId);
+  const a = row ? fromStored(userId, row.state) : null;
+  if (!row || !a) {
+    accounts.delete(userId);
+    versions.delete(userId);
+    return;
+  }
+  accounts.set(userId, a);
+  versions.set(userId, { version: Number(row.version), at: Number(row.at) });
+  for (const p of a.positions) followInBackground(p.mint);
+  sendToUser(userId, 'bot', accountView(a));
+}
+
+/**
+ * Save changed accounts (hourly, after user actions, and at shutdown). `force` (a user's own
+ * action) always wins; a routine save is skipped when another server saved a newer version, and
+ * that version is loaded instead.
+ */
+export function savePaper(onlyUser?: string, opts: { force?: boolean } = {}): Promise<void> {
+  return serial(() => saveAccounts(onlyUser, opts));
+}
+
+async function saveAccounts(onlyUser: string | undefined, opts: { force?: boolean }) {
   if (!db || !ready) return;
   const ids = onlyUser ? (dirty.has(onlyUser) ? [onlyUser] : []) : [...dirty];
   for (const id of ids) {
     const a = accounts.get(id);
     dirty.delete(id);
     if (!a) continue;
+    const known = versions.get(id);
+    const state = JSON.stringify(serialize(a));
     try {
-      await db.query(
-        `insert into paper_accounts (user_id, state, updated_at) values ($1, $2, now())
-         on conflict (user_id) do update set state = excluded.state, updated_at = now()`,
-        [id, JSON.stringify(serialize(a))],
-      );
+      // A routine save of an account this server loaded only updates the version it saw (never
+      // re-creates a row someone deleted); a user's own action, or a brand-new account, always writes.
+      const { rows } =
+        known && !opts.force
+          ? await db.query<{ version: string; at: number }>(
+              `update paper_accounts set state = $2, updated_at = now(), version = version + 1
+               where user_id = $1 and version = $3
+               returning version, extract(epoch from updated_at) * 1000 as at`,
+              [id, state, known.version],
+            )
+          : await db.query<{ version: string; at: number }>(
+              `insert into paper_accounts (user_id, state, updated_at, version) values ($1, $2, now(), 1)
+               on conflict (user_id) do update set state = excluded.state, updated_at = now(), version = paper_accounts.version + 1
+               returning version, extract(epoch from updated_at) * 1000 as at`,
+              [id, state],
+            );
+      if (rows[0]) versions.set(id, { version: Number(rows[0].version), at: Number(rows[0].at) });
+      else if (!stopping) {
+        console.log(`[paper] account ${id.slice(0, 8)} was saved by another server; using that copy`);
+        await reloadAccount(id);
+      }
     } catch (e) {
       const code = (e as { code?: string }).code;
       if (code === '23503') accounts.delete(id); // the user deleted their account
@@ -595,6 +689,30 @@ export async function savePaper(onlyUser?: string) {
       }
     }
   }
+}
+
+/** Take over accounts another server (the previous one, during a deploy) saved after this one loaded them. */
+function syncFromOtherServer(): Promise<void> {
+  return serial(checkOtherServer);
+}
+
+async function checkOtherServer() {
+  if (!db || stopping) return;
+  const { rows } = await db.query<{ user_id: string; version: string; at: number }>(
+    `select user_id, version, extract(epoch from updated_at) * 1000 as at from paper_accounts`,
+  );
+  for (const r of rows) {
+    const known = versions.get(r.user_id);
+    const version = Number(r.version);
+    // A newer version, or (from a server that predates versions) a newer save of the same version.
+    const newer = !known || version > known.version || (version === known.version && Number(r.at) > known.at + 1);
+    if (newer && (known || !accounts.has(r.user_id))) await reloadAccount(r.user_id);
+  }
+}
+
+/** Stop trading and syncing (the server is shutting down; the final save follows). */
+export function stopPaper() {
+  stopping = true;
 }
 
 /** Accounts saved by older versions lack the best/worst lists and breakdowns: rebuild them from the trade log. */
@@ -621,22 +739,17 @@ export async function startPaper() {
         user_id uuid primary key references users(id) on delete cascade,
         state jsonb not null,
         updated_at timestamptz not null default now()
-      )
+      );
+      alter table paper_accounts add column if not exists version bigint not null default 0;
     `);
-    const { rows } = await db.query<{ user_id: string; state: Omit<Account, 'userId'> }>(`select user_id, state from paper_accounts`);
+    const { rows } = await db.query<{ user_id: string; state: StoredAccount; version: string; at: number }>(
+      `select user_id, state, version, extract(epoch from updated_at) * 1000 as at from paper_accounts`,
+    );
     for (const r of rows) {
-      const s = r.state;
-      if (!s || typeof s.cash !== 'number' || !Array.isArray(s.positions)) continue;
-      const a: Account = {
-        ...s,
-        userId: r.user_id,
-        settings: { ...DEFAULT_PAPER_SETTINGS, ...s.settings },
-        cooldown: s.cooldown ?? {},
-        missingSince: {},
-        totals: s.totals ?? { closed: 0, wins: 0, sumPct: 0, winSol: 0, lossSol: 0, best: null, worst: null },
-      };
-      upgrade(a);
+      const a = fromStored(r.user_id, r.state);
+      if (!a) continue;
       accounts.set(r.user_id, a);
+      versions.set(r.user_id, { version: Number(r.version), at: Number(r.at) });
     }
     // Make sure every open trade's coin is being priced (it may not be after a restart).
     for (const a of accounts.values()) for (const p of a.positions) followInBackground(p.mint);
@@ -655,6 +768,14 @@ export async function startPaper() {
     }
   }, TICK_MS).unref();
   setInterval(() => void savePaper(), ML.flushEveryMs).unref();
+  // During a deploy the previous server keeps running for a moment and saves its final state when
+  // it stops: pick that up. (Every 15s for the first 10 minutes after starting.)
+  const bootedAt = Date.now();
+  const sync = setInterval(() => {
+    if (Date.now() - bootedAt > 10 * 60_000) return clearInterval(sync);
+    void syncFromOtherServer().catch((e) => console.warn('[paper] sync check failed:', e instanceof Error ? e.message : e));
+  }, 15_000);
+  sync.unref();
   // Refresh open positions' prices for anyone watching.
   setInterval(() => {
     const online = connectedUsers();
