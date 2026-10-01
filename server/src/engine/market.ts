@@ -6,7 +6,7 @@ import type {
   TokenSource,
   TokenView,
 } from '../../../shared/types';
-import { NON_MEME_MINTS, NON_MEME_TAGS, SOL_MINT } from '../config';
+import { NON_MEME_MINTS, NON_MEME_TAGS, SOL_MINT, USDC_MINT, USDT_MINT } from '../config';
 import { broadcast } from '../lib/bus';
 import { registerPersisted } from '../lib/cache';
 import { num } from '../lib/http';
@@ -475,25 +475,56 @@ export interface EntryInfo {
   freshAt: number;
   hidden: boolean;
   /**
-   * The lower of DexScreener's and Jupiter's liquidity readings (USD), so one source's glitch can't
-   * make a thin pool look deep. Null when neither reports it.
+   * How deep the coin's main pool is (USD, both sides), measured conservatively: what slippage and
+   * trade sizes are based on. Null when no source reports it.
    */
   liquidityLow: number | null;
-  /** Both sources report liquidity and disagree by more than 3x: the numbers can't be trusted. */
+  /** DexScreener and Jupiter disagree far beyond their usual difference: the numbers can't be trusted. */
   liquidityConflict: boolean;
+}
+
+/** USD value of one unit of a pool's quote token, when it's SOL or a dollar stablecoin. */
+function quotePrice(address: string | undefined): number | null {
+  if (address === SOL_MINT) return solPrice;
+  if (address === USDC_MINT || address === USDT_MINT) return 1;
+  return null;
+}
+
+/**
+ * Pool depth. DexScreener reports the whole pool; for SOL and dollar pairs it's checked against the
+ * quote side's actual reserve (two equal sides: depth = 2 x the SOL side), so an inflated price for
+ * the coin itself can't make a thin pool look deep. Jupiter's figure is about ONE side of the pool
+ * (half of DexScreener's on PumpSwap and Raydium; measured 2026-10-01), so it's only used when
+ * DexScreener has no pair or has gone stale, and as a sanity check. (Taking the lower of the two
+ * raw numbers, as before, halved every pool: thinner-looking coins were skipped and slippage doubled.)
+ */
+function poolDepth(e: Entry, now: number): { depth: number | null; conflict: boolean } {
+  const dsUsd = num(e.ds?.liquidity?.usd);
+  const quote = num(e.ds?.liquidity?.quote);
+  const qPrice = quotePrice(e.ds?.quoteToken?.address);
+  const fromReserve = quote != null && quote > 0 && qPrice != null && qPrice > 0 ? 2 * quote * qPrice : null;
+  const ds = dsUsd != null && dsUsd > 0 && fromReserve != null ? Math.min(dsUsd, fromReserve) : dsUsd != null && dsUsd > 0 ? dsUsd : fromReserve;
+  const jupRaw = num(e.jup?.liquidity);
+  const jup = jupRaw != null && jupRaw > 0 ? jupRaw : null;
+  if (ds == null) return { depth: jup, conflict: false };
+  if (jup == null) return { depth: ds, conflict: false };
+  const jupFresh = now - e.jupAt < 120_000;
+  const dsStale = now - e.dsAt >= 120_000;
+  // Jupiter is about half; more than 3x beyond that either way means one of them is wrong.
+  const conflict = ds > 6 * jup || jup > 6 * ds;
+  // DexScreener stopped updating but Jupiter didn't: don't trust an old (maybe pre-rug) reading.
+  return { depth: dsStale && jupFresh ? Math.min(ds, 2 * jup) : ds, conflict };
 }
 
 function info(e: Entry): EntryInfo | null {
   if (!e.view) return null;
-  const ds = num(e.ds?.liquidity?.usd);
-  const jup = num(e.jup?.liquidity);
-  const both = ds != null && jup != null && ds > 0 && jup > 0;
+  const { depth, conflict } = poolDepth(e, Date.now());
   return {
     view: e.view,
     freshAt: Math.max(e.ds ? e.dsAt : 0, e.jup ? e.jupAt : 0),
     hidden: e.hidden,
-    liquidityLow: both ? Math.min(ds, jup) : (ds ?? jup ?? null),
-    liquidityConflict: both && Math.max(ds, jup) / Math.min(ds, jup) > 3,
+    liquidityLow: depth,
+    liquidityConflict: conflict,
   };
 }
 

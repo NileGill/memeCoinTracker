@@ -26,7 +26,8 @@ export interface DsPair {
   txns?: Partial<Record<'m5' | 'h1' | 'h6' | 'h24', { buys: number; sells: number }>>;
   volume?: Partial<Record<'m5' | 'h1' | 'h6' | 'h24', number>>;
   priceChange?: Partial<Record<'m5' | 'h1' | 'h6' | 'h24', number>>;
-  liquidity?: { usd?: number };
+  /** usd = the whole pool; base / quote = token amounts on each side. */
+  liquidity?: { usd?: number; base?: number; quote?: number };
   fdv?: number;
   marketCap?: number;
   pairCreatedAt?: number;

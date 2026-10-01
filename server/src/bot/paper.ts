@@ -28,8 +28,8 @@ import { feedsOk } from '../ml/recorder';
  *    pool's liquidity gets a much worse price, and you can never take out more than the pool
  *    holds. (The first version capped slippage at 50%, which let big positions "sell" into
  *    near-empty pools and produced absurd profits.)
- *  - Liquidity is the lower of DexScreener's and Jupiter's readings; coins where they disagree
- *    wildly are skipped.
+ *  - Pool depth is measured from the pool's actual SOL (or dollar) reserve, checked against
+ *    DexScreener and Jupiter; coins where the sources disagree wildly are skipped.
  *  - Trade size is capped at a small share of the pool and an absolute SOL amount, so the bot
  *    never buys more than a coin can absorb.
  *  - Take-profits fill at the target price, never at a momentary spike above it; stop-losses
@@ -366,8 +366,9 @@ function candidates(now: number, riskMax: number | null) {
     if (info.hidden || !(v.priceUsd! > 0) || now - info.freshAt > 60_000) continue;
     const liq = info.liquidityLow;
     if (liq == null || liq < ML.tradeMinLiquidity || info.liquidityConflict) continue;
-    // A pool bigger than the whole coin's value means the numbers are off.
-    if (v.mcap != null && v.mcap > 0 && liq > v.mcap * 1.5) continue;
+    // A pool's coin side can't be worth more than the whole coin (depth is both sides), so a much
+    // deeper pool than that means the numbers are off.
+    if (v.mcap != null && v.mcap > 0 && liq > v.mcap * 2.5) continue;
     if (v.flags.some((f) => f.severity === 'danger')) continue;
     const l: Live = { price: v.priceUsd!, view: v, liquidity: liq, liquidityConflict: false, freshAt: info.freshAt };
     if (v.ai?.pick) model.push({ live: l, rank: (v.ai.ev ?? 0) * 100 + v.ai.win });
@@ -379,6 +380,32 @@ function candidates(now: number, riskMax: number | null) {
   return { model, score };
 }
 
+/**
+ * Per account, over the last hour: coins its strategy wanted, and those its own settings ruled out
+ * (thinner than its minimum liquidity, or a trade too small to place). Shown in the bot's status
+ * so a quiet bot explains itself. Memory only.
+ */
+const wanted = new Map<string, Map<string, number>>();
+const skipped = new Map<string, Map<string, { at: number; why: 'liquidity' | 'size' }>>();
+const HOUR = 3_600_000;
+
+function noteWanted(userId: string, mint: string, now: number) {
+  let m = wanted.get(userId);
+  if (!m) wanted.set(userId, (m = new Map()));
+  m.set(mint, now);
+}
+
+function noteSkipped(userId: string, mint: string, why: 'liquidity' | 'size', now: number) {
+  let m = skipped.get(userId);
+  if (!m) skipped.set(userId, (m = new Map()));
+  m.set(mint, { at: now, why });
+}
+
+function forgetOld(now: number) {
+  for (const m of wanted.values()) for (const [mint, at] of m) if (now - at > HOUR) m.delete(mint);
+  for (const m of skipped.values()) for (const [mint, x] of m) if (now - x.at > HOUR) m.delete(mint);
+}
+
 function tick() {
   if (!ready || stopping || !accounts.size) return;
   const sol = getSolPrice();
@@ -386,6 +413,7 @@ function tick() {
   const now = Date.now();
   const model = modelForBot();
   const lists = candidates(now, model?.scoreRiskMax ?? null);
+  forgetOld(now);
   for (const a of accounts.values()) {
     manage(a, now, sol);
     if (now - a.lastCurveAt >= CURVE_EVERY_MS) {
@@ -398,13 +426,18 @@ function tick() {
     if (!strategy) continue;
     const list = strategy === 'model' ? lists.model : lists.score.filter((c) => c.live.view.score! >= a.settings.scoreMin);
     const target = strategy === 'model' ? model!.target : scoreTarget();
+    for (const c of list) noteWanted(a.userId, c.live.view.mint, now);
     for (const c of list) {
       if (a.positions.length >= a.settings.maxOpen || a.cash - FEE_SOL < 0.01) break;
       const v = c.live.view;
-      if (c.live.liquidity! < a.settings.minLiquidity) continue;
       if (a.positions.some((p) => p.mint === v.mint) || (a.cooldown[v.mint] ?? 0) > now) continue;
+      if (c.live.liquidity! < a.settings.minLiquidity) {
+        noteSkipped(a.userId, v.mint, 'liquidity', now);
+        continue;
+      }
       const size = tradeSize(a, c.live.liquidity!, sol, now);
       if (size > 0) open(a, c.live, size, strategy, target, now);
+      else noteSkipped(a.userId, v.mint, 'size', now);
     }
   }
 }
@@ -459,6 +492,24 @@ function readiness(a: Account, s: PaperStats): ReadinessCheck[] {
   ];
 }
 
+/** Why the bot hasn't been buying, if its own settings are what's stopping it (empty otherwise). */
+function skipNote(a: Account, strategy: PaperStrategy): string {
+  if (a.positions.length >= a.settings.maxOpen) return ''; // full anyway: skips don't matter
+  const w = wanted.get(a.userId)?.size ?? 0;
+  const sk = [...(skipped.get(a.userId)?.values() ?? [])];
+  const thin = sk.filter((x) => x.why === 'liquidity').length;
+  const small = sk.filter((x) => x.why === 'size').length;
+  if (!thin && !small) return '';
+  const coins = (n: number) => `${n} ${n === 1 ? 'coin' : 'coins'}`;
+  const found = strategy === 'model' ? `the AI picked ${coins(w)}` : `${coins(w)} scored ${a.settings.scoreMin}+`;
+  const parts: string[] = [];
+  const min = a.settings.minLiquidity;
+  const minText = min >= 1e6 ? `$${Math.round(min / 1e5) / 10}M` : `$${Math.round(min / 1000)}K`;
+  if (thin) parts.push(`${thin} had less liquidity than your ${minText} minimum`);
+  if (small) parts.push(`${small} would have been a trade under 0.01 SOL (balance too low)`);
+  return ` In the last hour ${found}; ${parts.join(' and ')}, so the bot skipped ${thin + small === 1 ? 'it' : 'them'}.`;
+}
+
 function activity(a: Account): string {
   if (a.settings.paused) return a.positions.length ? 'Paused: managing open trades only, no new buys.' : 'Paused.';
   const model = modelForBot();
@@ -466,8 +517,8 @@ function activity(a: Account): string {
   const holding = `Holding ${a.positions.length} of ${a.settings.maxOpen}.`;
   if (!strategy) return `Waiting for the AI model to prove itself before trading (you chose "model only"). ${holding}`;
   if (strategy === 'score')
-    return `Trading on the MemeRadar score (${a.settings.scoreMin}+)${model?.scoreRiskMax != null ? ', skipping coins the crash model flags,' : ''} until the AI model proves itself. ${holding}`;
-  return `Trading the AI model's picks (likely winners it doesn't expect to crash). ${holding}`;
+    return `Trading on the MemeRadar score (${a.settings.scoreMin}+)${model?.scoreRiskMax != null ? ', skipping coins the crash model flags,' : ''} until the AI model proves itself. ${holding}${skipNote(a, strategy)}`;
+  return `Trading the AI model's picks (likely winners it doesn't expect to crash). ${holding}${skipNote(a, strategy)}`;
 }
 
 export function accountView(a: Account, tradeLimit = 100): PaperAccountView {
