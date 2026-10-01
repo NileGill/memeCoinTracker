@@ -27,6 +27,7 @@ function Driver({ d, max }: { d: AiDriver; max: number }) {
 /** The AI model's rating of this coin and the biggest reasons behind it. */
 function AiPanel({ t, drivers }: { t: TokenView; drivers: AiDriver[] | null | undefined }) {
   const model = useStore((s) => s.ml?.model);
+  const following = useStore((s) => s.ml?.following ?? false);
   if (!t.ai || !model) return null;
   const { win, ev, pick, risk } = t.ai;
   const max = Math.max(...(drivers ?? []).map((d) => Math.abs(d.impact)), 0.001);
@@ -36,7 +37,7 @@ function AiPanel({ t, drivers }: { t: TokenView; drivers: AiDriver[] | null | un
         <h2>
           <Icon name="sparkles" size={15} /> AI model
         </h2>
-        <span className={`badge ${model.proven ? 'green' : 'amber'}`}>{model.proven ? 'proven in testing' : 'not proven yet'}</span>
+        <span className={`badge ${following ? 'green' : 'amber'}`}>{following ? 'proven in testing' : model.proven ? 'out of date' : 'not proven yet'}</span>
       </div>
       <div className="panel-body col" style={{ gap: 10 }}>
         <div style={{ fontSize: 13.5 }}>
@@ -50,10 +51,10 @@ function AiPanel({ t, drivers }: { t: TokenView; drivers: AiDriver[] | null | un
           .{' '}
           {pick ? (
             <b className="up">The bot would buy this now.</b>
-          ) : model.proven ? (
+          ) : following ? (
             <span className="muted">Not strong enough for the bot to buy.</span>
           ) : (
-            <span className="muted">The bot doesn't follow the AI until it passes its test.</span>
+            <span className="muted">The bot isn't following the AI right now (see the AI bot page).</span>
           )}
         </div>
         {risk != null && (

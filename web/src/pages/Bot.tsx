@@ -175,7 +175,7 @@ function ModelResults({ m }: { m: MlModelInfo }) {
 
 function Picks({ ml }: { ml: MlStatus | null }) {
   const tokenList = useStore((s) => s.tokenList);
-  const proven = ml?.model?.proven ?? false;
+  const proven = ml?.following ?? false;
   const rows = useMemo(
     () =>
       tokenList

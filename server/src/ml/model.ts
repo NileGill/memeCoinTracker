@@ -57,6 +57,12 @@ interface Calib {
 }
 
 let current: SavedModel | null = null;
+
+/** After this long without a successful retrain, a proven model stops being followed (it learned on old data). */
+const STALE_AFTER_MS = 3 * ML.trainEveryMs;
+const stale = (info: MlModelInfo) => Date.now() - info.version > STALE_AFTER_MS;
+/** Proven, and recent enough to act on. */
+const trusted = (info: MlModelInfo) => info.proven && !stale(info);
 let training = false;
 let lastAttempt = 0;
 /** Why the last attempt didn't produce a model (shown while collecting). */
@@ -76,6 +82,9 @@ interface Outcome {
 const netFrom = (exitPct: number, entryPct: number) =>
   (((1 + exitPct / 100) / (1 + entryPct / 100)) * (1 - ML.costPerSide)) / (1 + ML.costPerSide) * 100 - 100;
 
+/** A buy that lands after the coin already fell this far (it rugged between the signal and the fill). */
+const COLLAPSED_PCT = -90;
+
 /**
  * What a bot trade with this target would have done from snapshot `i` (null = unusable row).
  * The buy lands at the next reading after the snapshot, not at the snapshot price.
@@ -85,11 +94,17 @@ function outcomeFor(d: Dataset, i: number, t: Target): Outcome | null {
   if (d.out[o + OUT_AT.gap]) return null;
   const e1 = d.out[o + OUT_AT.e1];
   const entry = Number.isNaN(e1) ? 0 : e1;
-  const netReturn = (grossFromSnapshot: number) => netFrom(grossFromSnapshot, entry);
   const ti = ML.tpLevels.indexOf(t.tp);
   const si = ML.slLevels.indexOf(t.sl);
   const tpT = d.out[o + OUT_AT.tp + ti];
   const slT = d.out[o + OUT_AT.sl + si];
+  // The coin collapsed before the buy landed: like the paper bot, buying into an emptied pool gets
+  // ~nothing back. (Measuring from a price near zero once divided by zero and broke training.)
+  if (entry <= COLLAPSED_PCT) return { y: 0, ret: -100, exitSec: slT >= 0 ? slT : horizonSec };
+  // Levels are measured from the snapshot price, but a real trade's target is set from its fill: it
+  // never sells for more than the target above what it paid, and can't lose more than everything.
+  const best = netFrom(t.tp, 0);
+  const netReturn = (grossFromSnapshot: number) => Math.min(best, Math.max(-100, netFrom(grossFromSnapshot, entry)));
   // Same tick counts as the stop (conservative). A target sale fills at the next reading after the
   // target is reached (capped at the target), so brief spikes don't count as full wins.
   if (tpT >= 0 && (slT < 0 || tpT < slT)) {
@@ -168,9 +183,11 @@ const cleanSim = (s: Sim): StrategyResult => ({
  * often (then the one with more trades).
  */
 function chooseBest<T>(items: T[], sim: (t: T) => Sim): T | null {
-  if (!items.length) return null;
-  const top = Math.max(...items.map((x) => sim(x).avgReturn));
-  const close = items.filter((x) => sim(x).avgReturn >= top - ML.preferWinRateWithin);
+  // A result that isn't a number can never be best (one used to make every option lose silently).
+  const usable = items.filter((x) => Number.isFinite(sim(x).avgReturn));
+  if (!usable.length) return null;
+  const top = Math.max(...usable.map((x) => sim(x).avgReturn));
+  const close = usable.filter((x) => sim(x).avgReturn >= top - ML.preferWinRateWithin);
   close.sort((a, b) => sim(b).winRate - sim(a).winRate || sim(b).trades - sim(a).trades);
   return close[0];
 }
@@ -393,7 +410,17 @@ async function train() {
       const risk = crashUsable ? Array.from(tu.rows, (i) => crashProb[i]) : null;
       const rule = pickRule(d, tu.rows, tu.outs, fit.validProb!, risk, tuneMinTrades);
       if (rule) cands.push({ target, gbdt: fit.model, rule });
-      else why.push(`${name}: no bar gave ${tuneMinTrades}+ tuning trades (all coins: ${simulate(d, tu.rows, tu.outs, () => true).trades})`);
+      else {
+        const pr = Array.from(fit.validProb!);
+        const ok = pr.filter((v) => Number.isFinite(v)).sort((x, z) => x - z);
+        const q = (f: number) => (ok.length ? ok[Math.min(ok.length - 1, Math.floor(f * ok.length))].toFixed(4) : '-');
+        const median = ok.length ? ok[Math.floor(ok.length / 2)] : NaN;
+        why.push(
+          `${name}: no bar gave ${tuneMinTrades}+ tuning trades (all coins: ${simulate(d, tu.rows, tu.outs, () => true).trades}, ` +
+            `top half: ${simulate(d, tu.rows, tu.outs, (k) => fit.validProb![k] >= median).trades}; ${fit.model.trees.length} trees, base ${fit.model.base.toFixed(3)}, ` +
+            `${pr.length - ok.length} of ${pr.length} scores not numbers, scores min ${q(0)} median ${q(0.5)} p99 ${q(0.99)} max ${q(1)})`,
+        );
+      }
     }
     const best = chooseBest(cands, (c) => c.rule.sim);
     if (!best) throw new Note('Too few coins hit any profit target yet to learn what winners look like.', why.join('; '));
@@ -448,10 +475,11 @@ async function train() {
       problems.push(
         `Most of its test period was recorded before buy and sell delays were measured (${Math.round(coverage * 100)}% measured), so its results are likely too rosy. Waiting for newer data.`,
       );
-    if (test.avgReturn < ML.proven.minAvgReturn)
+    // Written so that a result that isn't a number fails the check instead of passing it.
+    if (!(test.avgReturn >= ML.proven.minAvgReturn))
       problems.push(`Test trades averaged ${round(test.avgReturn, 1)}% after fees (needs +${ML.proven.minAvgReturn}% or better).`);
     if (test.trades < minTrades) problems.push(`Only ${test.trades} test trades (needs ${minTrades}): not enough to judge.`);
-    if (testAuc < ML.proven.minAuc) problems.push(`Its ranking of coins wasn't reliably better than chance (skill ${round(testAuc, 2)}; needs ${ML.proven.minAuc}).`);
+    if (!(testAuc >= ML.proven.minAuc)) problems.push(`Its ranking of coins wasn't reliably better than chance (skill ${round(testAuc, 2)}; needs ${ML.proven.minAuc}).`);
 
     const imp = importance(best.gbdt);
     const impTotal = imp.reduce((a, v) => a + v, 0) || 1;
@@ -572,7 +600,7 @@ function signalFor(v: TokenView, p: number, risk: number | null): AiSignal {
     win: round(Number.isFinite(win) ? win : p, 2),
     ev: Number.isFinite(ev) ? round(ev, 1) : null,
     risk: risk == null ? null : round(risk, 2),
-    pick: c.info.proven && p >= c.threshold && safeEnough && (v.liquidity ?? 0) >= ML.tradeMinLiquidity && !danger,
+    pick: trusted(c.info) && p >= c.threshold && safeEnough && (v.liquidity ?? 0) >= ML.tradeMinLiquidity && !danger,
   };
 }
 
@@ -610,7 +638,7 @@ export function explain(v: TokenView): AiDriver[] | null {
 export function modelForBot(): { proven: boolean; target: AiTarget; version: number; scoreRiskMax: number | null } | null {
   if (!current) return null;
   return {
-    proven: current.info.proven,
+    proven: trusted(current.info),
     target: current.info.target,
     version: current.info.version,
     scoreRiskMax: current.crash ? current.scoreRiskMax : null,
@@ -631,6 +659,10 @@ export function mlStatus(): MlStatus {
   } else if (!info) {
     state = 'collecting';
     message = `Learning from live data: ${r.samples.toLocaleString('en-US')} coin snapshots with known outcomes, ${r.pending.toLocaleString('en-US')} still being followed. ${lastNote ?? ready.why}`.trim();
+  } else if (info.proven && stale(info)) {
+    state = 'unproven';
+    const hours = Math.round((Date.now() - info.version) / 3_600_000);
+    message = `Passed its test, but it was trained ${hours} hours ago and hasn't retrained since, so the bot isn't following it until a retrain works.`;
   } else if (info.proven) {
     state = 'ready';
     message = `Proven on the most recent data it never trained on: ${info.test.trades} test trades averaged ${info.test.avgReturn > 0 ? '+' : ''}${info.test.avgReturn}% after fees.`;
@@ -654,6 +686,7 @@ export function mlStatus(): MlStatus {
     trainedAt: info?.version ?? null,
     nextTrainingAt: training || !ready.ok ? null : next,
     model: info,
+    following: Boolean(info && trusted(info)),
     lastAttempt: lastResult,
   };
 }
