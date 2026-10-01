@@ -61,6 +61,8 @@ let training = false;
 let lastAttempt = 0;
 /** Why the last attempt didn't produce a model (shown while collecting). */
 let lastNote: string | null = null;
+/** How the most recent attempt went, shown even when an older model is still in use. */
+let lastResult: MlStatus['lastAttempt'] = null;
 
 // ---------------------------------------------------------------- outcomes for a target
 
@@ -502,6 +504,7 @@ async function train() {
       },
     };
     lastNote = null;
+    lastResult = { at: startedAt, seconds: Math.round((Date.now() - startedAt) / 1000), ok: true, note: null };
     console.log(
       `[ml] trained in ${((Date.now() - startedAt) / 1000).toFixed(1)}s on ${trainAll.length} rows: target +${best.target.tp}/-${best.target.sl}` +
         `, crash model skill ${round(crashTestAuc, 2)}${rule.risk != null ? ` (cap ${round(rule.risk, 2)})` : ' (no cap)'}` +
@@ -512,9 +515,19 @@ async function train() {
   } catch (e) {
     if (e instanceof Note) lastNote = e.message;
     else {
-      lastNote = 'Training failed; it will try again later.';
+      // Say what broke (and where), so a failure that repeats can be diagnosed from the status alone.
+      const where =
+        e instanceof Error
+          ? (e.stack ?? '')
+              .split('\n')
+              .slice(1, 3)
+              .map((l) => l.trim().replace(/\(.*[\\/]/, '('))
+              .join(' ')
+          : '';
+      lastNote = `Training failed (${e instanceof Error ? e.message : String(e)}${where ? ` ${where}` : ''}); it will try again later.`;
       console.error('[ml] training failed:', e);
     }
+    lastResult = { at: startedAt, seconds: Math.round((Date.now() - startedAt) / 1000), ok: false, note: lastNote };
     console.log(`[ml] no new model: ${lastNote}`);
   } finally {
     release();
@@ -606,6 +619,9 @@ export function mlStatus(): MlStatus {
     const every = ML.trainEveryMs >= 3_600_000 ? `${ML.trainEveryMs / 3_600_000} hours` : `${ML.trainEveryMs / 60_000} minutes`;
     message = `Trained, but not good enough to trade on yet. ${info.problems[0] ?? ''} It retrains every ${every} as data grows.`;
   }
+  // An older model is still in use because the latest retrain didn't work: say so.
+  if (!training && info && lastResult && !lastResult.ok && lastResult.at > info.version)
+    message += ` The latest retrain didn't produce a new model: ${lastResult.note}`;
   // Retrain a full cycle after the last model; after a failed attempt, retry half a cycle later.
   const next = Math.max(info ? info.version + ML.trainEveryMs : 0, lastAttempt ? lastAttempt + ML.trainEveryMs / 2 : 0) || Date.now();
   return {
@@ -618,6 +634,7 @@ export function mlStatus(): MlStatus {
     trainedAt: info?.version ?? null,
     nextTrainingAt: training || !ready.ok ? null : next,
     model: info,
+    lastAttempt: lastResult,
   };
 }
 

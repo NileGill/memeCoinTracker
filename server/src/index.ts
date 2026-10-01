@@ -155,7 +155,7 @@ app.get('/api/health', (_req, res) => {
     uptimeS: Math.round(process.uptime()),
     memoryMb: { rss: Math.round(mem.rss / 1e6), heap: Math.round(mem.heapUsed / 1e6) },
     cpuS: Math.round((cpu.user + cpu.system) / 1e6),
-    ml: { samples: ml.samples, pending: ml.pending, stored: ml.stored, state: mlStatus().state },
+    ml: { samples: ml.samples, pending: ml.pending, stored: ml.stored, state: mlStatus().state, lastAttempt: mlStatus().lastAttempt },
     market: marketSize(),
     status: allStatus(),
   });

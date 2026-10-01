@@ -464,7 +464,10 @@ async function ensureTable() {
 
 /** Load recent stored snapshots into memory (newest first until the cap, then applied oldest first). */
 async function loadHistory() {
-  if (!db) return;
+  if (!db) {
+    loaded = true; // nothing stored to load (no database): start learning from live data right away
+    return;
+  }
   busy++;
   const started = Date.now();
   try {
