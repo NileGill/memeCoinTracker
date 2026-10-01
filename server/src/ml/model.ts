@@ -364,6 +364,9 @@ async function train() {
     // ---- the win model, once per target; the tuning data picks the bar and the crash cutoff
     type Cand = { target: Target; gbdt: GbdtModel; rule: Rule };
     const cands: Cand[] = [];
+    // What each target had to work with, reported if none of them yields a model.
+    const unusable = (rows: Int32Array) => (rows.length ? Math.round((100 * rows.reduce((a, i) => a + (d.out[i * OUT_W + OUT_AT.gap] ? 1 : 0), 0)) / rows.length) : 0);
+    const why: string[] = [`learn ${trainAll.length} (${unusable(trainAll)}% with price holes), tune ${tuneAll.length} (${unusable(tuneAll)}% with holes)`];
     const withOutcomes = (rows: Int32Array, target: Target) => {
       const r: number[] = [];
       const o: Outcome[] = [];
@@ -381,14 +384,19 @@ async function train() {
       tr.rows.forEach((i, k) => (y[i] = tr.outs[k].y));
       tu.rows.forEach((i, k) => (y[i] = tu.outs[k].y));
       const pos = tr.outs.reduce((a, o) => a + o.y, 0);
-      if (pos < 20 || tr.outs.length - pos < 20 || !tu.rows.length) continue;
+      const name = `+${target.tp}/-${target.sl}`;
+      if (pos < 20 || tr.outs.length - pos < 20 || !tu.rows.length) {
+        why.push(`${name}: ${pos} winners of ${tr.outs.length}, ${tu.rows.length} to tune on`);
+        continue;
+      }
       const fit = await fitGbdt({ X: d.X, F, y, train: tr.rows, valid: tu.rows, params, pacer });
       const risk = crashUsable ? Array.from(tu.rows, (i) => crashProb[i]) : null;
       const rule = pickRule(d, tu.rows, tu.outs, fit.validProb!, risk, tuneMinTrades);
       if (rule) cands.push({ target, gbdt: fit.model, rule });
+      else why.push(`${name}: no bar gave ${tuneMinTrades}+ tuning trades (all coins: ${simulate(d, tu.rows, tu.outs, () => true).trades})`);
     }
     const best = chooseBest(cands, (c) => c.rule.sim);
-    if (!best) throw new Note('Too few coins hit any profit target yet to learn what winners look like.');
+    if (!best) throw new Note('Too few coins hit any profit target yet to learn what winners look like.', why.join('; '));
 
     // ---- the honest test: the newest data, untouched by every choice above
     const test0 = withOutcomes(testAll, best.target);
@@ -528,6 +536,10 @@ async function train() {
       console.error('[ml] training failed:', e);
     }
     lastResult = { at: startedAt, seconds: Math.round((Date.now() - startedAt) / 1000), ok: false, note: lastNote };
+    if (e instanceof Note && e.detail) {
+      lastResult.detail = e.detail;
+      console.log(`[ml] details: ${e.detail}`);
+    }
     console.log(`[ml] no new model: ${lastNote}`);
   } finally {
     release();
@@ -536,7 +548,15 @@ async function train() {
   }
 }
 
-class Note extends Error {}
+/** An expected reason not to produce a model (not a bug); `detail` goes to the health check. */
+class Note extends Error {
+  constructor(
+    message: string,
+    public detail?: string,
+  ) {
+    super(message);
+  }
+}
 
 // ---------------------------------------------------------------- live predictions
 

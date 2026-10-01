@@ -35,7 +35,7 @@ import { allStatus } from './lib/status';
 import { persistAll, restoreAll } from './lib/cache';
 import { restoreState, saveNow, state } from './lib/store';
 import { explain, mlStatus, startModel } from './ml/model';
-import { flushSnapshots, recorderStatus, startRecorder } from './ml/recorder';
+import { dataQuality, flushSnapshots, recorderStatus, startRecorder } from './ml/recorder';
 import { jupSearch, jupShield, jupTokens, ultraExecute, ultraHoldings, ultraOrder } from './sources/jupiter';
 import { newsList, onNews, startNews } from './sources/news';
 import { rugcheckSummary } from './sources/rugcheck';
@@ -155,7 +155,7 @@ app.get('/api/health', (_req, res) => {
     uptimeS: Math.round(process.uptime()),
     memoryMb: { rss: Math.round(mem.rss / 1e6), heap: Math.round(mem.heapUsed / 1e6) },
     cpuS: Math.round((cpu.user + cpu.system) / 1e6),
-    ml: { samples: ml.samples, pending: ml.pending, stored: ml.stored, state: mlStatus().state, lastAttempt: mlStatus().lastAttempt },
+    ml: { samples: ml.samples, pending: ml.pending, stored: ml.stored, state: mlStatus().state, lastAttempt: mlStatus().lastAttempt, quality: dataQuality() },
     market: marketSize(),
     status: allStatus(),
   });

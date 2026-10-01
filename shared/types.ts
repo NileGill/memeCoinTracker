@@ -165,7 +165,7 @@ export interface MlStatus {
   nextTrainingAt: number | null;
   model: MlModelInfo | null;
   /** The most recent training attempt (null before the first one since the server started). */
-  lastAttempt: { at: number; seconds: number; ok: boolean; note: string | null } | null;
+  lastAttempt: { at: number; seconds: number; ok: boolean; note: string | null; detail?: string } | null;
 }
 
 // ---- Paper trading bot

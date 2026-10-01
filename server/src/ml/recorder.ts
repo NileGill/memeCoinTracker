@@ -370,6 +370,15 @@ const waiting: { obs: Obs; out: Outcome }[] = [];
 let tMin = Infinity;
 let tMax = -Infinity;
 
+function recomputeRange() {
+  tMin = Infinity;
+  tMax = -Infinity;
+  for (let k = 0; k < data.n; k++) {
+    if (data.t[k] < tMin) tMin = data.t[k];
+    if (data.t[k] > tMax) tMax = data.t[k];
+  }
+}
+
 function writeRow(obs: Obs, out: Outcome) {
   if (data.n >= CAP) {
     // Drop the oldest 10% (rows are appended in time order).
@@ -383,12 +392,7 @@ function writeRow(obs: Obs, out: Outcome) {
     data.danger.copyWithin(0, drop, data.n);
     data.score.copyWithin(0, drop, data.n);
     data.n = keep;
-    tMin = Infinity;
-    tMax = -Infinity;
-    for (let k = 0; k < keep; k++) {
-      if (data.t[k] < tMin) tMin = data.t[k];
-      if (data.t[k] > tMax) tMax = data.t[k];
-    }
+    recomputeRange();
   }
   const i = data.n++;
   data.t[i] = obs.t;
@@ -566,6 +570,7 @@ export async function flushSnapshots() {
 
 export function recorderStatus() {
   const has = data.n > 0;
+  if (has && !(tMin <= tMax)) recomputeRange(); // rows were written some other way (tests)
   return { samples: data.n + waiting.length, pending: open.length, stored, dataFrom: has ? tMin : null, dataTo: has ? tMax : null, loaded };
 }
 
@@ -587,6 +592,19 @@ export function startRecorder() {
   void loadHistory().then(() => {
     setInterval(() => void flushSnapshots(), ML.flushEveryMs).unref();
   });
+}
+
+/** Share of snapshots with holes in their price data (unusable) or a dead feed (rug), recent vs older. */
+export function dataQuality() {
+  const day = Date.now() - 86_400_000;
+  const q = { last24h: { rows: 0, holes: 0, gone: 0 }, older: { rows: 0, holes: 0, gone: 0 } };
+  for (let i = 0; i < data.n; i++) {
+    const b = data.t[i] >= day ? q.last24h : q.older;
+    b.rows++;
+    if (data.out[i * OUT_W + OUT_AT.gap]) b.holes++;
+    if (data.out[i * OUT_W + OUT_AT.gone]) b.gone++;
+  }
+  return q;
 }
 
 /** False while most price feeds are down (an outage, not a rug). */
