@@ -216,7 +216,8 @@ export interface PaperPosition {
   entrySeenAt?: number;
 }
 
-export type PaperExit = 'tp' | 'sl' | 'time' | 'manual' | 'gone' | 'reset';
+/** 'faded': the price reached the target but had fallen back by the time the sale landed. */
+export type PaperExit = 'tp' | 'faded' | 'sl' | 'time' | 'manual' | 'gone' | 'reset';
 
 export interface PaperTrade {
   id: string;
@@ -236,6 +237,8 @@ export interface PaperTrade {
   signal: number;
   entryLiquidity?: number;
   exitLiquidity?: number;
+  /** The take-profit the trade aimed for (% above the buy price). */
+  targetPct?: number;
 }
 
 export interface PaperBucket {

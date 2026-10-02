@@ -459,6 +459,7 @@ function PositionRow({ p }: { p: PaperPosition }) {
 
 const REASON: Record<PaperTrade['reason'], string> = {
   tp: 'target hit',
+  faded: 'target touched, sold lower',
   sl: 'stop hit',
   time: 'time limit',
   manual: 'sold by you',
@@ -473,10 +474,11 @@ function TradeRow({ t }: { t: PaperTrade }) {
       <div className="main-col">
         <div className="title">
           <span className="truncate">{t.symbol}</span>
-          <span className={`badge ${t.reason === 'tp' ? 'green' : t.reason === 'sl' || t.reason === 'gone' ? 'red' : ''}`}>{REASON[t.reason]}</span>
+          <span className={`badge ${t.reason === 'tp' ? 'green' : t.reason === 'faded' ? 'amber' : t.reason === 'sl' || t.reason === 'gone' ? 'red' : ''}`}>{REASON[t.reason] ?? t.reason}</span>
         </div>
         <div className="meta truncate">
           {fmtAgo(t.closedAt)} · held {fmtAge(t.openedAt, t.closedAt)} · {fmtSol(t.costSol)} in
+          {t.exitPrice > 0 && t.entryPrice > 0 && ` · sold at ${fmtPct((t.exitPrice / t.entryPrice - 1) * 100)}${t.targetPct != null ? ` (target +${t.targetPct}%)` : ''}`}
           {t.entryLiquidity != null && ` · pool ${fmtUsd(t.entryLiquidity)}`} · {t.strategy === 'model' ? 'AI pick' : `score ${t.signal}`}
         </div>
       </div>
@@ -668,6 +670,7 @@ function BotDashboard({ a }: { a: PaperAccountView }) {
 
 const REASON_LABEL: Record<string, string> = {
   tp: 'Hit the target',
+  faded: 'Touched the target, sold lower',
   sl: 'Hit the stop',
   time: 'Sold at the time limit',
   manual: 'Sold by you',

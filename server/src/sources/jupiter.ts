@@ -97,12 +97,13 @@ export async function jupRecent(): Promise<JupToken[]> {
   return Array.isArray(rows) ? rows : [];
 }
 
-export async function jupPrices(mints: string[]): Promise<Record<string, number>> {
+export async function jupPrices(mints: string[], lane: 'data' | 'trade' = 'data', timeoutMs?: number): Promise<Record<string, number>> {
   const url = `${base()}/price/v3?ids=${mints.join(',')}`;
   const data = await fetchJson<Record<string, { usdPrice?: number } | null>>(url, {
-    limiter: dataLimiter,
+    limiter: lane === 'trade' ? tradeLimiter : dataLimiter,
     headers: headers(),
     backoffMs: 30_000,
+    timeoutMs,
   });
   const out: Record<string, number> = {};
   for (const [mint, v] of Object.entries(data ?? {})) {

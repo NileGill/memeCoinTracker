@@ -17,6 +17,7 @@ import { allEntries, entryInfo, followInBackground, getSolPrice, registerHold } 
 import { connectedUsers, sendToUser } from '../lib/bus';
 import { ML } from '../ml/config';
 import { modelForBot } from '../ml/model';
+import { jupPrices } from '../sources/jupiter';
 import { feedsOk } from '../ml/recorder';
 
 /*
@@ -263,10 +264,13 @@ function keepTop(list: PaperTrade[], t: PaperTrade, better: (x: PaperTrade, y: P
   return [...list, t].sort(better).slice(0, TOP_N);
 }
 
-function close(a: Account, pos: PaperPosition, reason: PaperExit, seenPrice: number, now: number, sol: number) {
+function close(a: Account, pos: PaperPosition, why: PaperExit, seenPrice: number, now: number, sol: number) {
   const l = live(pos.mint, now);
   const liquidity = l?.liquidity ?? pos.lastLiquidity ?? pos.entryLiquidity ?? 0;
-  const price = reason === 'tp' ? Math.min(seenPrice, tpPrice(pos)) : seenPrice;
+  const price = why === 'tp' ? Math.min(seenPrice, tpPrice(pos)) : seenPrice;
+  // The price reached the target, but by the time the sale landed it had fallen back: under 90% of
+  // the target's gain (e.g. below +45% for a +50% target) it doesn't count as "target hit".
+  const reason: PaperExit = why === 'tp' && (price / pos.entryPrice - 1) * 100 < pos.target.tp * 0.9 ? 'faded' : why;
   const { valueUsd, proceeds } = reason === 'gone' ? { valueUsd: 0, proceeds: 0 } : saleProceeds(pos, price, liquidity, sol);
   if (reason !== 'gone') a.feesSol += Math.max(0, (valueUsd / sol) - proceeds);
   a.cash = r6(a.cash + proceeds);
@@ -292,6 +296,7 @@ function close(a: Account, pos: PaperPosition, reason: PaperExit, seenPrice: num
     signal: pos.signal,
     entryLiquidity: pos.entryLiquidity,
     exitLiquidity: Math.round(liquidity),
+    targetPct: pos.target.tp,
   };
   a.trades.unshift(trade);
   if (a.trades.length > MAX_TRADES) a.trades.length = MAX_TRADES;
@@ -312,6 +317,31 @@ function close(a: Account, pos: PaperPosition, reason: PaperExit, seenPrice: num
   pushCurve(a, now, sol);
   touchAccount(a);
   emit(a, { type: 'close', trade });
+}
+
+/**
+ * The target was just seen: sell at the price a few seconds later, the way a real bot's sale lands
+ * (the price feeds only refresh every 10-25 seconds, and waiting for the next refresh let brief
+ * spikes fade into losing "target hit" trades). If the price can't be fetched, or looks wrong, the
+ * next refresh completes the sale as before.
+ */
+async function sellNow(userId: string, posId: string, seenPrice: number) {
+  const mint = accounts.get(userId)?.positions.find((p) => p.id === posId)?.mint;
+  if (!mint) return;
+  let price: number | null = null;
+  try {
+    price = (await jupPrices([mint], 'trade', 5_000))[mint] ?? null;
+  } catch {
+    return;
+  }
+  // The account may have changed meanwhile (sold, reloaded by another server, shutting down).
+  const a = accounts.get(userId);
+  const pos = a?.positions.find((p) => p.id === posId);
+  const sol = getSolPrice();
+  if (!a || !pos || pos.pending || pos.tpSeenAt == null || !sol || stopping) return;
+  // A different source: ignore a price wildly off the one just seen (a glitch, not a move).
+  if (price == null || !(price > 0) || price < seenPrice * 0.5 || price > seenPrice * 2) return;
+  close(a, pos, 'tp', price, Date.now(), sol);
 }
 
 /** Sell positions that hit their target, stop, or time limit. */
@@ -337,7 +367,10 @@ function manage(a: Account, now: number, sol: number) {
         if (l.freshAt > pos.tpSeenAt) close(a, pos, 'tp', l.price, now, sol);
         continue;
       }
-      if (move >= pos.target.tp) pos.tpSeenAt = l.freshAt;
+      if (move >= pos.target.tp) {
+        pos.tpSeenAt = l.freshAt;
+        void sellNow(a.userId, pos.id, l.price);
+      }
       else if (move <= -pos.target.sl) close(a, pos, 'sl', l.price, now, sol);
       else if (now >= pos.closeBy) close(a, pos, 'time', l.price, now, sol);
       continue;

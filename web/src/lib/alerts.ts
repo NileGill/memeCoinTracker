@@ -236,7 +236,7 @@ export function handleBotEvent(ev: BotEvent) {
     });
   } else {
     const t = ev.trade;
-    const why = { tp: 'hit its target', sl: 'hit its stop', time: 'time limit reached', manual: 'sold by you', gone: 'price feed died: counted as a total loss', reset: 'account reset' }[t.reason];
+    const why = { tp: 'hit its target', faded: 'touched its target, but the price fell back before the sale landed', sl: 'hit its stop', time: 'time limit reached', manual: 'sold by you', gone: 'price feed died: counted as a total loss', reset: 'account reset' }[t.reason];
     push({
       kind: 'bot',
       severity: t.pnlSol > 0 ? 'high' : 'normal',
