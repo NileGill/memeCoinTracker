@@ -269,27 +269,31 @@ function isotonic(vals: number[], weights: number[]): number[] {
   return blocks.flatMap((b) => Array(b.n).fill(b.v));
 }
 
-/** Bins by probability: how many trades made money (after fees) and their average return. */
+/**
+ * Bins by probability: how many trades made money (after fees) and their average return. Bins get
+ * finer toward the top (the last are the top 5%, 2% and 1%), where the bot's picks are; a single
+ * top-10% bin used to give every pick the average of far weaker coins.
+ */
 function calibrate(prob: number[], outs: Outcome[]): Calib {
   const idx = prob.map((_, i) => i).sort((a, b) => prob[a] - prob[b]);
-  const size = Math.max(40, Math.floor(idx.length / 10));
+  const n = idx.length;
+  const MIN = 40;
+  const parts: number[][] = [];
+  let from = 0;
+  for (const edge of [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.98, 0.99, 1]) {
+    const to = Math.round(edge * n);
+    // Too few rows for a bin of its own: it joins the next one.
+    if (to - from < MIN && edge < 1) continue;
+    if (to > from) parts.push(idx.slice(from, to));
+    from = to;
+  }
+  // A last bin too small to say much is folded into the one before it.
+  if (parts.length > 1 && parts[parts.length - 1].length < MIN) parts[parts.length - 2].push(...parts.pop()!);
   const p: number[] = [];
   const win: number[] = [];
   const ev: number[] = [];
   const w: number[] = [];
-  for (let s = 0; s < idx.length; s += size) {
-    const part = idx.slice(s, s + size);
-    if (part.length < size / 2 && p.length) {
-      // Fold a small tail into the previous bin.
-      const n0 = w[w.length - 1];
-      const n1 = part.length;
-      const tot = n0 + n1;
-      p[p.length - 1] = (p[p.length - 1] * n0 + part.reduce((a, i) => a + prob[i], 0)) / tot;
-      win[win.length - 1] = (win[win.length - 1] * n0 + part.reduce((a, i) => a + (outs[i].ret > 0 ? 1 : 0), 0)) / tot;
-      ev[ev.length - 1] = (ev[ev.length - 1] * n0 + part.reduce((a, i) => a + outs[i].ret, 0)) / tot;
-      w[w.length - 1] = tot;
-      continue;
-    }
+  for (const part of parts) {
     p.push(part.reduce((a, i) => a + prob[i], 0) / part.length);
     win.push(part.reduce((a, i) => a + (outs[i].ret > 0 ? 1 : 0), 0) / part.length);
     ev.push(part.reduce((a, i) => a + outs[i].ret, 0) / part.length);
@@ -503,8 +507,14 @@ async function train() {
       .sort((a, b) => b.importance - a.importance)
       .slice(0, 10);
 
-    const calibRows = [...tuneRows, ...testRows];
-    const calibOuts = [...tuneOuts, ...testOuts];
+    // Only snapshots a bot could have bought (enough liquidity, no danger flags, the buy within the
+    // slippage limit), so a coin's numbers describe trades the bot would actually make.
+    const canTrade = (i: number) => d.liq[i] >= ML.tradeMinLiquidity && !d.danger[i] && !(d.out[i * OUT_W + OUT_AT.e1] > ML.maxChasePct);
+    const calibAll = [...tuneRows, ...testRows];
+    const calibAllOuts = [...tuneOuts, ...testOuts];
+    const calibKeep = calibAll.map((i, k) => (canTrade(i) ? k : -1)).filter((k) => k >= 0);
+    const calibRows = calibKeep.map((k) => calibAll[k]);
+    const calibOuts = calibKeep.map((k) => calibAllOuts[k]);
     const calibProb = calibRows.map((i) => predict(best.gbdt, rowX(i)));
     // Rate coins against similar coins on the same side of the crash cap, so a pick's numbers match the test.
     const isSafe = (i: number) => rule.risk == null || crashProb[i] <= rule.risk;
