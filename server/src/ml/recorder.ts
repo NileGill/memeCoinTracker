@@ -175,9 +175,15 @@ export interface Outcome {
   gone: number;
   /** 1 = our own data had a hole (outage): excluded from training. */
   gap: number;
+  /**
+   * What the AI decided at this snapshot, while it was proven and up to date: the index in ML.targets
+   * it picked the coin for, or -1 if it passed (null: no such AI at the time). Its live record is
+   * built from these. Missing in snapshots recorded before this was added.
+   */
+  pick?: number | null;
 }
 
-const OUT_FIELDS = ['tp', 'tpn', 'e1', 'sl', 'slr', 'rq', 'hi', 'lo', 'last', 'gone', 'gap'] as const;
+const OUT_FIELDS = ['tp', 'tpn', 'e1', 'sl', 'slr', 'rq', 'hi', 'lo', 'last', 'gone', 'gap', 'pick'] as const;
 
 interface Open {
   obs: Obs;
@@ -192,6 +198,16 @@ interface Open {
 }
 
 const open: Open[] = [];
+
+/**
+ * Called for every new snapshot (by the model, which decides on the spot whether the bot buys it).
+ * Returns what to record as the snapshot's `pick`.
+ */
+type Judge = (obs: Obs, freshAt: number) => number | null;
+let judge: Judge | null = null;
+export function setSnapshotJudge(fn: Judge) {
+  judge = fn;
+}
 const openPerMint = new Map<string, number>();
 const lastSampled = new Map<string, number>();
 const finished: { obs: Obs; out: Outcome }[] = [];
@@ -213,6 +229,12 @@ function sample(now: number) {
     const obs = makeObs(v, ctx);
     if (!obs) continue;
     lastSampled.set(v.mint, now);
+    let pick: number | null = null;
+    try {
+      pick = judge ? judge(obs, info.freshAt) : null;
+    } catch (e) {
+      console.error('[ml] judging a snapshot failed:', e);
+    }
     open.push({
       obs,
       t0: now,
@@ -232,6 +254,7 @@ function sample(now: number) {
         last: 0,
         gone: 0,
         gap: 0,
+        pick,
       },
     });
     openPerMint.set(v.mint, (openPerMint.get(v.mint) ?? 0) + 1);
@@ -316,12 +339,12 @@ function follow(now: number) {
 
 // ---------------------------------------------------------------- in-memory training set
 
-/** Values stored per row for outcomes: tp, sl, slr, rq, hi, lo, last, gone, gap, tpn. */
+/** Values stored per row for outcomes: tp, sl, slr, rq, hi, lo, last, gone, gap, tpn, e1, pick. */
 const NT = ML.tpLevels.length;
 const NS = ML.slLevels.length;
 const NQ = CHECKPOINTS.length;
 const BASE_W = NT + 2 * NS + NQ;
-export const OUT_W = BASE_W + 5 + NT + 1;
+export const OUT_W = BASE_W + 5 + NT + 2;
 export const OUT_AT = {
   tp: 0,
   sl: NT,
@@ -334,6 +357,8 @@ export const OUT_AT = {
   gap: BASE_W + 4,
   tpn: BASE_W + 5,
   e1: BASE_W + 5 + NT,
+  /** NaN when no AI was being followed (or recorded before this existed). */
+  pick: BASE_W + 5 + NT + 1,
 };
 
 const F = NUM_FEATURES;
@@ -406,6 +431,7 @@ function writeRow(obs: Obs, out: Outcome) {
   out.tp.forEach((v, k) => (data.out[o + OUT_AT.tp + k] = v));
   for (let k = 0; k < NT; k++) data.out[o + OUT_AT.tpn + k] = out.tpn?.[k] ?? NaN;
   data.out[o + OUT_AT.e1] = out.e1 ?? NaN;
+  data.out[o + OUT_AT.pick] = out.pick ?? NaN;
   out.sl.forEach((v, k) => (data.out[o + OUT_AT.sl + k] = v));
   out.slr.forEach((v, k) => (data.out[o + OUT_AT.slr + k] = v ?? NaN));
   out.rq.forEach((v, k) => (data.out[o + OUT_AT.rq + k] = v ?? NaN));

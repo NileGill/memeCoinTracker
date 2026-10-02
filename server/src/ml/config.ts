@@ -8,7 +8,10 @@ const scale = fast ? 0.1 : 1; // fast mode uses 10x smaller price moves so outco
 
 export const ML = {
   fast,
-  /** Take a snapshot of each coin this often (and once as soon as it appears). */
+  /**
+   * Take a snapshot of each coin this often (and once as soon as it appears). These are also the
+   * only moments the bot buys: the model is tested on snapshots, so it trades on snapshots.
+   */
   sampleEveryMs: fast ? 30_000 : 10 * 60_000,
   /** How long after a snapshot its outcome is followed. Also the longest a trade is held. */
   horizonMs: fast ? 4 * 60_000 : 60 * 60_000,
@@ -68,6 +71,16 @@ export const ML = {
   proven: { minTrades: fast ? 5 : 25, minAvgReturn: 1, minAuc: 0.55 },
   /** After the bot sells a coin it waits this long before buying it again (the backtest does the same). */
   cooldownMs: fast ? 4 * 60_000 : 60 * 60_000,
+  /**
+   * Slippage limit: a buy is cancelled if the price has run up more than this (%) above the price the
+   * coin was picked at by the time it lands, like a real swap with a slippage tolerance.
+   */
+  maxChasePct: 10 * scale,
+  /**
+   * The AI's live record: once its latest picks (followed exactly like test trades) number at least
+   * `minTrades` and average below `floor` % after fees, the bot stops following it until they recover.
+   */
+  live: { window: 30, minTrades: fast ? 6 : 20, floor: -2 },
 };
 
 export type Target = { tp: number; sl: number };

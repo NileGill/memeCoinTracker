@@ -95,7 +95,10 @@ export interface AiSignal {
   ev: number | null;
   /** Chance it crashes 50%+ (or its price vanishes) within the hour, 0-1 (null without a crash model). */
   risk: number | null;
-  /** Clears the bar the bot buys at. Only ever true once the model has proven itself. */
+  /**
+   * Picked at its latest 10-minute check, which is when the bot buys. Only ever true while the bot
+   * is following the AI.
+   */
   pick: boolean;
 }
 
@@ -168,6 +171,27 @@ export interface MlStatus {
   following: boolean;
   /** The most recent training attempt (null before the first one since the server started). */
   lastAttempt: { at: number; seconds: number; ok: boolean; note: string | null; detail?: string } | null;
+  /** How the AI's actual picks have done since they started being recorded (null until computed). */
+  live: MlLiveRecord | null;
+}
+
+export interface MlLiveSummary {
+  trades: number;
+  winRate: number;
+  /** % per trade after fees. */
+  avgReturn: number;
+}
+
+/**
+ * The AI's live picks, each followed exactly like a test trade (results arrive an hour after the
+ * pick). `recent` is the latest picks; when they're `losing`, the bot stops following the AI.
+ */
+export interface MlLiveRecord extends MlLiveSummary {
+  from: number | null;
+  totalReturn: number;
+  last24h: MlLiveSummary;
+  recent: MlLiveSummary;
+  losing: boolean;
 }
 
 // ---- Paper trading bot
@@ -195,8 +219,13 @@ export interface PaperPosition {
   symbol: string;
   icon: string | null;
   openedAt: number;
-  /** Market price when bought (TP/SL are measured from this). */
+  /** Price the buy filled at. */
   entryPrice: number;
+  /**
+   * Price when the coin was picked: the target and stop are measured from this, as in the AI's test.
+   * Missing on positions opened before this existed (they use entryPrice).
+   */
+  refPrice?: number;
   qty: number;
   costSol: number;
   target: AiTarget;
@@ -239,6 +268,8 @@ export interface PaperTrade {
   exitLiquidity?: number;
   /** The take-profit the trade aimed for (% above the buy price). */
   targetPct?: number;
+  /** The price when the coin was picked, which the target and stop were measured from. */
+  refPrice?: number;
 }
 
 export interface PaperBucket {

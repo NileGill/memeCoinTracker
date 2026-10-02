@@ -96,7 +96,7 @@ export function checkMarket(tokens: TokenView[], serverStartedAt: number) {
       }
     }
 
-    // The proven AI model rates this coin a buy.
+    // The AI picked this coin at its latest check (the bot buys at that moment).
     if (!t.ai?.pick) aiArmed.set(t.mint, true);
     else if (settings.alertAi && aiArmed.get(t.mint) !== false && !onCooldown(`ai:${t.mint}`, 60 * 60_000)) {
       aiArmed.set(t.mint, false);

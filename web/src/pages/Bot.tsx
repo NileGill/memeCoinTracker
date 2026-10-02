@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { MlModelInfo, MlStatus, PaperAccountView, PaperBucket, PaperPosition, PaperSettings, PaperTrade, StrategyResult, TokenView } from '../../../shared/types';
+import type { MlLiveRecord, MlModelInfo, MlStatus, PaperAccountView, PaperBucket, PaperPosition, PaperSettings, PaperTrade, StrategyResult, TokenView } from '../../../shared/types';
 import { Icon } from '../components/Icon';
 import { AiChip, Empty, Pct, TokenIcon, useTick } from '../components/common';
 import { botApi } from '../lib/bot';
@@ -56,7 +56,8 @@ function ModelPanel({ ml }: { ml: MlStatus | null }) {
   useTick(30_000);
   if (!ml) return null;
   const m = ml.model;
-  const st = STATE_LABEL[ml.state];
+  // Passed its test but not followed (out of date, or its live picks are losing): not "unproven".
+  const st = ml.state === 'unproven' && m?.proven ? { text: 'Paused', cls: 'amber' } : STATE_LABEL[ml.state];
   return (
     <section className="panel">
       <div className="panel-head">
@@ -74,7 +75,7 @@ function ModelPanel({ ml }: { ml: MlStatus | null }) {
 
         {how && (
           <div className="explain">
-            <b>What it predicts.</b> For any coin at any moment: if you bought right now, would it hit a profit target
+            <b>What it predicts.</b> For a coin at one of its 10-minute checks: if you bought now, would it hit a profit target
             (for example +30%) before a stop-loss (for example −15%) within an hour?
             <br />
             <b>What it learns from.</b> No free source has the full history of memecoin buyers, sellers, liquidity and
@@ -87,6 +88,10 @@ function ModelPanel({ ml }: { ml: MlStatus | null }) {
             how picky to be, and the newest 15% is a test it never trained on. Test trades pay fees and slippage, and a stop
             fills at the price actually seen, which is often worse than the stop. It's only called <i>proven</i> (and only
             then does the bot follow it) when those test trades made money. It retrains every few hours as data grows.
+            <br />
+            <b>Trading exactly as tested.</b> The bot buys only at those 10-minute checks, sets the target and stop from the price at the pick,
+            fills at the next price update, and cancels the buy if the price ran 10%+ higher first, just like the test. Every pick is also followed
+            live the same way, and that live record (below) has to hold up for the bot to keep following the AI.
             <br />
             <b>The crash filter.</b> A win-or-lose model can't tell a −15% stop from a rug that falls straight to zero, and rugs
             gap right through stop-losses. So a second model learns which coins crash 50%+ (or vanish) within the hour, and the bot
@@ -108,8 +113,31 @@ function ModelPanel({ ml }: { ml: MlStatus | null }) {
         </div>
 
         {m && <ModelResults m={m} />}
+        {m && ml.live && <LiveRecord live={ml.live} />}
       </div>
     </section>
+  );
+}
+
+/** How the AI's real picks have done, followed exactly like its test trades. */
+function LiveRecord({ live }: { live: MlLiveRecord }) {
+  return (
+    <div className="col" style={{ gap: 6 }}>
+      <div className="dim" style={{ fontSize: 12.5 }}>
+        <b>Live record:</b> every coin the AI has picked {live.from ? `since ${fmtWhen(live.from)}` : 'from now on'}, followed exactly like a test
+        trade (each result is known an hour after the pick). If its latest picks (the last 30, once there are at least 20) average below −2%
+        after fees, the bot stops following it until they recover.
+      </div>
+      {live.trades ? (
+        <>
+          <StrategyLine label="AI picks, live (all)" r={{ ...live, profitFactor: null }} />
+          {live.last24h.trades > 0 && live.last24h.trades < live.trades && <StrategyLine label="Last 24 hours" r={{ ...live.last24h, totalReturn: 0, profitFactor: null }} />}
+          {live.recent.trades < live.trades && <StrategyLine label={`Latest ${live.recent.trades}`} r={{ ...live.recent, totalReturn: 0, profitFactor: null }} />}
+        </>
+      ) : (
+        <div className="dim" style={{ fontSize: 12.5 }}>No finished live picks yet.</div>
+      )}
+    </div>
   );
 }
 
@@ -189,15 +217,15 @@ function Picks({ ml }: { ml: MlStatus | null }) {
     <section className="panel">
       <div className="panel-head">
         <h2>
-          <Icon name="target" size={15} /> {proven ? 'AI picks right now' : 'Highest rated right now'}
+          <Icon name="target" size={15} /> {proven ? "The AI's latest picks" : 'Highest rated right now'}
         </h2>
-        <span className="sub">{proven ? 'coins the bot would buy' : 'unproven model: for information only'}</span>
+        <span className="sub">{proven ? 'picked at its 10-minute checks in the last 10 minutes; the bot buys at the moment of the pick' : 'not followed by the bot right now: for information only'}</span>
       </div>
       <div className="feed">
         {rows.map((t) => (
           <PickRow key={t.mint} t={t} />
         ))}
-        {!rows.length && <Empty>{proven ? 'Nothing clears the bar right now. The bot waits for strong setups.' : 'No rated coins yet.'}</Empty>}
+        {!rows.length && <Empty>{proven ? 'Nothing picked in the last 10 minutes. The bot waits for strong setups.' : 'No rated coins yet.'}</Empty>}
       </div>
     </section>
   );
@@ -315,8 +343,8 @@ function SettingsFields({ s, onChange }: { s: PaperSettings; onChange: (s: Paper
         </span>
         <span className="dim" style={{ fontWeight: 400 }}>
           {s.mode === 'auto'
-            ? 'Starts trading right away on the MemeRadar score and switches to the AI once it proves itself.'
-            : 'Waits and trades nothing until the AI model passes its test.'}
+            ? 'Trades the AI while it has proven itself; otherwise falls back to the MemeRadar score, but only while the score is making money in the latest test.'
+            : 'Trades only while the AI model has passed its test and its live picks are holding up.'}
         </span>
       </label>
     </div>
@@ -405,9 +433,14 @@ function PositionRow({ p }: { p: PaperPosition }) {
   const [busy, setBusy] = useState(false);
   const price = live ?? p.lastPrice;
   const move = (price / p.entryPrice - 1) * 100;
+  // The target and stop are set from the price the coin was picked at (as in the AI's test), so
+  // from the buy price they're a little different from the nominal +X% / -Y%.
+  const ref = p.refPrice ?? p.entryPrice;
+  const tpAt = ref * (1 + p.target.tp / 100);
+  const slAt = ref * (1 - p.target.sl / 100);
   // What selling now would actually return: capped at the target price, after pool slippage, the 1% fee and the network fee.
   const side = (p.lastLiquidity ?? p.entryLiquidity ?? 0) / 2;
-  const usd = p.qty * Math.min(price, p.entryPrice * (1 + p.target.tp / 100));
+  const usd = p.qty * Math.min(price, tpAt);
   const value = solPrice && side > 0 ? Math.max(0, (((usd * side) / (side + usd)) * 0.99) / solPrice - 0.0005) : null;
   const left = Math.max(0, p.closeBy - Date.now());
   if (p.pending)
@@ -419,7 +452,7 @@ function PositionRow({ p }: { p: PaperPosition }) {
             <span className="truncate">{p.symbol}</span>
             <span className="badge">buying…</span>
           </div>
-          <div className="meta truncate">{fmtSol(p.costSol)} order placed · fills at the next price update</div>
+          <div className="meta truncate">{fmtSol(p.costSol)} order placed · fills at the next price update unless the price runs 10%+ above the pick</div>
         </div>
       </div>
     );
@@ -432,7 +465,8 @@ function PositionRow({ p }: { p: PaperPosition }) {
           <span className={`badge ${p.strategy === 'model' ? 'accent' : ''}`}>{p.strategy === 'model' ? 'AI' : `score ${p.signal}`}</span>
         </div>
         <div className="meta truncate">
-          in at {fmtPrice(p.entryPrice)} · {fmtSol(p.costSol)} · +{p.target.tp}% / −{p.target.sl}% · sells in {Math.ceil(left / 60_000)}m
+          in at {fmtPrice(p.entryPrice)} · {fmtSol(p.costSol)} · target {fmtPct((tpAt / p.entryPrice - 1) * 100)} / stop {fmtPct((slAt / p.entryPrice - 1) * 100)} · sells in{' '}
+          {Math.ceil(left / 60_000)}m
         </div>
       </div>
       <div className="num" style={{ textAlign: 'right', fontSize: 12.5 }}>
@@ -552,8 +586,9 @@ function BotDashboard({ a }: { a: PaperAccountView }) {
           <EquityChart a={a} />
           <div className="dim" style={{ fontSize: 12 }}>
             Running since {fmtWhen(a.createdAt)}. Cash {fmtSol(a.cash)}. Every buy and sell pays a 1% fee, a network fee and slippage from
-            the coin's pool size; trades are capped at {a.settings.maxPoolPct}% of a pool and {fmtSol(a.settings.maxTradeSol)}; targets fill at the
-            target price, never at a spike; stops fill at the price actually seen.
+            the coin's pool size; trades are capped at {a.settings.maxPoolPct}% of a pool and {fmtSol(a.settings.maxTradeSol)}. Like the AI's test, it buys
+            at the AI's 10-minute checks, sets the target and stop from the price at the pick, and cancels a buy if the price runs 10%+ higher before it
+            lands. Targets fill at the target price, never at a spike; stops fill at the price actually seen.
           </div>
         </div>
       </section>
@@ -642,7 +677,7 @@ function BotDashboard({ a }: { a: PaperAccountView }) {
           ) : (
             <div className="dim">
               {a.settings.sizePct}% of the balance per trade, at most {fmtSol(a.settings.maxTradeSol)} and {a.settings.maxPoolPct}% of a coin's pool · up
-              to {a.settings.maxOpen} at once · coins with {fmtUsd(a.settings.minLiquidity)}+ liquidity · {a.settings.mode === 'auto' ? `score ${a.settings.scoreMin}+ until the AI is proven, then the AI` : 'AI picks only'}
+              to {a.settings.maxOpen} at once · coins with {fmtUsd(a.settings.minLiquidity)}+ liquidity · {a.settings.mode === 'auto' ? `the AI when proven, otherwise score ${a.settings.scoreMin}+ if that's making money` : 'AI picks only'}
             </div>
           )}
           {msg && <div className="notice red">{msg}</div>}

@@ -13,10 +13,10 @@ import type {
   TokenView,
 } from '../../../shared/types';
 import { db } from '../auth/db';
-import { allEntries, entryInfo, followInBackground, getSolPrice, registerHold } from '../engine/market';
+import { entryInfo, followInBackground, getSolPrice, registerHold } from '../engine/market';
 import { connectedUsers, sendToUser } from '../lib/bus';
 import { ML } from '../ml/config';
-import { modelForBot } from '../ml/model';
+import { modelForBot, modelLoaded, notFollowingReason, snapshotSignalsSince, type SnapshotSignal } from '../ml/model';
 import { jupPrices } from '../sources/jupiter';
 import { feedsOk } from '../ml/recorder';
 
@@ -35,6 +35,9 @@ import { feedsOk } from '../ml/recorder';
  *    never buys more than a coin can absorb.
  *  - Take-profits fill at the target price, never at a momentary spike above it; stop-losses
  *    fill at the price actually seen (often worse than the stop).
+ *  - It trades exactly the way the AI was tested: it buys only at the AI's 10-minute snapshots,
+ *    measures the target and stop from the price the coin was picked at, and cancels a buy whose
+ *    price ran up past the slippage limit before it landed.
  *  - Every swap pays a 1% pool/router fee and a network fee; a coin whose price feed dies
  *    counts as a total loss.
  */
@@ -138,8 +141,10 @@ function live(mint: string, now: number): Live | null {
   return { price, view: info.view, liquidity: info.liquidityLow, liquidityConflict: info.liquidityConflict, freshAt: info.freshAt };
 }
 
+/** The price the target and stop are measured from: the price when the coin was picked. */
+const refPrice = (p: PaperPosition) => p.refPrice ?? p.entryPrice;
 /** Take-profits fill at the target price, never above it (a momentary spike isn't a fill). */
-const tpPrice = (p: PaperPosition) => p.entryPrice * (1 + p.target.tp / 100);
+const tpPrice = (p: PaperPosition) => refPrice(p) * (1 + p.target.tp / 100);
 
 /** SOL you'd get selling the whole position at `price` into a pool of `liquidity`, after fees. */
 function saleProceeds(p: PaperPosition, price: number, liquidity: number | null | undefined, sol: number) {
@@ -179,9 +184,18 @@ function touchAccount(a: Account) {
 
 const scoreTarget = (): AiTarget => ({ ...ML.scoreTarget, holdMin: Math.round(ML.horizonMs / 60_000) });
 
+/** The score strategy made money in the latest test (or hasn't been tested yet). */
+function scoreWorks(model: ReturnType<typeof modelForBot>): boolean {
+  if (!model) return true;
+  const r = model.score;
+  return r != null && r.trades >= ML.proven.minTrades && r.avgReturn >= ML.proven.minAvgReturn;
+}
+
 function strategyFor(a: Account, model: ReturnType<typeof modelForBot>): PaperStrategy | null {
+  if (!modelLoaded()) return null; // starting up: don't mistake "not loaded yet" for "no model"
   if (model?.proven) return 'model';
-  return a.settings.mode === 'auto' ? 'score' : null;
+  // Before the AI is followed, the score is the fallback, but not once it has tested as a loser.
+  return a.settings.mode === 'auto' && scoreWorks(model) ? 'score' : null;
 }
 
 /** The most SOL this account would put into this coin right now (0 = don't buy). */
@@ -194,9 +208,10 @@ function tradeSize(a: Account, liquidity: number, sol: number, now: number): num
 
 /**
  * Place a buy. Like a real order, it lands a moment later: it fills at the next fresh price
- * reading (see fill), not at the price that triggered it. The SOL is set aside meanwhile.
+ * reading after the snapshot (see fill), not at the price that triggered it. The SOL is set aside
+ * meanwhile. The target, stop and time limit count from the snapshot, as in the AI's test.
  */
-function open(a: Account, l: Live, size: number, strategy: PaperStrategy, target: AiTarget, now: number) {
+function open(a: Account, l: Live, size: number, strategy: PaperStrategy, target: AiTarget, now: number, pickedAt: number) {
   const v = l.view;
   a.cash = r6(a.cash - size - FEE_SOL);
   a.positions.push({
@@ -206,10 +221,11 @@ function open(a: Account, l: Live, size: number, strategy: PaperStrategy, target
     icon: v.icon,
     openedAt: now,
     entryPrice: l.price,
+    refPrice: l.price,
     qty: 0,
     costSol: r6(size + FEE_SOL),
     target,
-    closeBy: now + target.holdMin * 60_000,
+    closeBy: pickedAt + target.holdMin * 60_000,
     strategy,
     signal: strategy === 'model' ? (v.ai?.win ?? 0) : (v.score ?? 0),
     lastPrice: l.price,
@@ -224,13 +240,18 @@ function open(a: Account, l: Live, size: number, strategy: PaperStrategy, target
 
 /** The buy lands: price and pool as of this (newer) reading, with slippage and fees. */
 function fill(a: Account, pos: PaperPosition, l: Live, sol: number, now: number) {
+  // The price ran up past the slippage limit since the pick: like a real swap, the buy fails. (No
+  // cooldown, as in the test: the coin can be bought at a later snapshot.)
+  if (l.price > refPrice(pos) * (1 + ML.maxChasePct / 100)) {
+    noteSkipped(a.userId, pos.mint, 'chase', now);
+    return cancel(a, pos, false);
+  }
   const liquidity = l.liquidity ?? pos.entryLiquidity ?? 0;
   const size = pos.costSol - FEE_SOL;
   const gotUsd = swapOut(size * sol * (1 - FEE), liquidity);
   pos.qty = gotUsd / l.price;
   pos.entryPrice = l.price;
   pos.openedAt = now;
-  pos.closeBy = now + pos.target.holdMin * 60_000;
   pos.lastPrice = l.price;
   pos.lastPriceAt = now;
   pos.entryLiquidity = Math.round(liquidity);
@@ -242,10 +263,10 @@ function fill(a: Account, pos: PaperPosition, l: Live, sol: number, now: number)
   emit(a, { type: 'open', position: pos });
 }
 
-/** A buy that never got a price to fill at (or you cancelled it): give the SOL back. */
-function cancel(a: Account, pos: PaperPosition) {
+/** A buy that never got a price to fill at, ran past the slippage limit, or you cancelled: give the SOL back. */
+function cancel(a: Account, pos: PaperPosition, cooldown = true) {
   a.cash = r6(a.cash + pos.costSol);
-  a.cooldown[pos.mint] = Date.now() + ML.cooldownMs;
+  if (cooldown) a.cooldown[pos.mint] = Date.now() + ML.cooldownMs;
   a.positions = a.positions.filter((p) => p.id !== pos.id);
   delete a.missingSince[pos.id];
   touchAccount(a);
@@ -268,9 +289,12 @@ function close(a: Account, pos: PaperPosition, why: PaperExit, seenPrice: number
   const l = live(pos.mint, now);
   const liquidity = l?.liquidity ?? pos.lastLiquidity ?? pos.entryLiquidity ?? 0;
   const price = why === 'tp' ? Math.min(seenPrice, tpPrice(pos)) : seenPrice;
+  // The target's gain over what the buy paid (the target is set from the pick price, so this
+  // differs a little from the nominal +X%).
+  const goal = (tpPrice(pos) / pos.entryPrice - 1) * 100;
   // The price reached the target, but by the time the sale landed it had fallen back: under 90% of
   // the target's gain (e.g. below +45% for a +50% target) it doesn't count as "target hit".
-  const reason: PaperExit = why === 'tp' && (price / pos.entryPrice - 1) * 100 < pos.target.tp * 0.9 ? 'faded' : why;
+  const reason: PaperExit = why === 'tp' && (price / pos.entryPrice - 1) * 100 < goal * 0.9 ? 'faded' : why;
   const { valueUsd, proceeds } = reason === 'gone' ? { valueUsd: 0, proceeds: 0 } : saleProceeds(pos, price, liquidity, sol);
   if (reason !== 'gone') a.feesSol += Math.max(0, (valueUsd / sol) - proceeds);
   a.cash = r6(a.cash + proceeds);
@@ -296,7 +320,8 @@ function close(a: Account, pos: PaperPosition, why: PaperExit, seenPrice: number
     signal: pos.signal,
     entryLiquidity: pos.entryLiquidity,
     exitLiquidity: Math.round(liquidity),
-    targetPct: pos.target.tp,
+    targetPct: r2(goal),
+    refPrice: refPrice(pos),
   };
   a.trades.unshift(trade);
   if (a.trades.length > MAX_TRADES) a.trades.length = MAX_TRADES;
@@ -360,7 +385,8 @@ function manage(a: Account, now: number, sol: number) {
       pos.lastPrice = l.price;
       pos.lastPriceAt = now;
       if (l.liquidity != null) pos.lastLiquidity = Math.round(l.liquidity);
-      const move = (l.price / pos.entryPrice - 1) * 100;
+      // From the pick price, like the test: the target is +X% and the stop -Y% from there.
+      const move = (l.price / refPrice(pos) - 1) * 100;
       // Target seen: the sale lands at the next fresh reading, like a real sell sent at that moment
       // (a brief spike has usually faded by then). Capped at the target price in close().
       if (pos.tpSeenAt != null) {
@@ -382,44 +408,53 @@ function manage(a: Account, now: number, sol: number) {
 }
 
 interface Candidate {
+  /** The coin as of its snapshot: price is the picked price, freshAt that reading's time. */
   live: Live;
   rank: number;
+  signal: SnapshotSignal;
 }
 
 /**
- * Coins the model picks, and coins the MemeRadar score likes (used until the model is proven).
- * Score picks skip coins the crash model rates too likely to crash, once it has shown it can.
- * Coins with untrustworthy liquidity data are never bought.
+ * Coins the model picked, and coins the MemeRadar score likes (used until the model is followed),
+ * at the snapshots just taken: the only moments the bot buys, because they're what the AI's test
+ * traded on. Score picks skip coins the crash model rates too likely to crash, once it has shown
+ * it can. Coins with untrustworthy liquidity data are never bought.
  */
-function candidates(now: number, riskMax: number | null) {
+function candidates(now: number, fresh: SnapshotSignal[]) {
   const model: Candidate[] = [];
   const score: Candidate[] = [];
-  for (const info of allEntries()) {
+  for (const s of fresh) {
+    if (now - s.at > 30_000) continue; // too late to act on it the way the test did
+    const info = entryInfo(s.mint);
+    if (!info || info.hidden) continue;
     const v = info.view;
-    if (info.hidden || !(v.priceUsd! > 0) || now - info.freshAt > 60_000) continue;
     const liq = info.liquidityLow;
     if (liq == null || liq < ML.tradeMinLiquidity || info.liquidityConflict) continue;
     // A pool's coin side can't be worth more than the whole coin (depth is both sides), so a much
     // deeper pool than that means the numbers are off.
     if (v.mcap != null && v.mcap > 0 && liq > v.mcap * 2.5) continue;
     if (v.flags.some((f) => f.severity === 'danger')) continue;
-    const l: Live = { price: v.priceUsd!, view: v, liquidity: liq, liquidityConflict: false, freshAt: info.freshAt };
-    if (v.ai?.pick) model.push({ live: l, rank: (v.ai.ev ?? 0) * 100 + v.ai.win });
-    const safeEnough = riskMax == null || (v.ai?.risk != null && v.ai.risk <= riskMax);
-    if (v.score != null && v.score >= 60 && safeEnough && !v.flags.some((f) => RISKY.has(f.code))) score.push({ live: l, rank: v.score });
+    const l: Live = { price: s.price, view: v, liquidity: liq, liquidityConflict: false, freshAt: s.freshAt };
+    if (s.pick && s.target) model.push({ live: l, rank: s.rank, signal: s });
+    if (s.score != null && s.score >= 60 && s.scoreSafe && !v.flags.some((f) => RISKY.has(f.code))) score.push({ live: l, rank: s.score, signal: s });
   }
   model.sort((x, y) => y.rank - x.rank);
   score.sort((x, y) => y.rank - x.rank);
   return { model, score };
 }
 
+/** The last snapshot the bot has looked at. */
+let seenSignal = 0;
+
 /**
- * Per account, over the last hour: coins its strategy wanted, and those its own settings ruled out
- * (thinner than its minimum liquidity, or a trade too small to place). Shown in the bot's status
- * so a quiet bot explains itself. Memory only.
+ * Per account, over the last hour: coins its strategy wanted, those its own settings ruled out
+ * (thinner than its minimum liquidity, or a trade too small to place), and buys cancelled because
+ * the price ran past the slippage limit. Shown in the bot's status so a quiet bot explains itself.
+ * Memory only.
  */
 const wanted = new Map<string, Map<string, number>>();
-const skipped = new Map<string, Map<string, { at: number; why: 'liquidity' | 'size' }>>();
+type SkipWhy = 'liquidity' | 'size' | 'chase';
+const skipped = new Map<string, Map<string, { at: number; why: SkipWhy }>>();
 const HOUR = 3_600_000;
 
 function noteWanted(userId: string, mint: string, now: number) {
@@ -428,7 +463,7 @@ function noteWanted(userId: string, mint: string, now: number) {
   m.set(mint, now);
 }
 
-function noteSkipped(userId: string, mint: string, why: 'liquidity' | 'size', now: number) {
+function noteSkipped(userId: string, mint: string, why: SkipWhy, now: number) {
   let m = skipped.get(userId);
   if (!m) skipped.set(userId, (m = new Map()));
   m.set(mint, { at: now, why });
@@ -445,7 +480,9 @@ function tick() {
   if (!sol) return;
   const now = Date.now();
   const model = modelForBot();
-  const lists = candidates(now, model?.scoreRiskMax ?? null);
+  const fresh = snapshotSignalsSince(seenSignal);
+  if (fresh.length) seenSignal = fresh[fresh.length - 1].seq;
+  const lists = candidates(now, fresh);
   forgetOld(now);
   for (const a of accounts.values()) {
     manage(a, now, sol);
@@ -457,8 +494,7 @@ function tick() {
     if (a.settings.paused) continue;
     const strategy = strategyFor(a, model);
     if (!strategy) continue;
-    const list = strategy === 'model' ? lists.model : lists.score.filter((c) => c.live.view.score! >= a.settings.scoreMin);
-    const target = strategy === 'model' ? model!.target : scoreTarget();
+    const list = strategy === 'model' ? lists.model : lists.score.filter((c) => c.signal.score! >= a.settings.scoreMin);
     for (const c of list) noteWanted(a.userId, c.live.view.mint, now);
     for (const c of list) {
       if (a.positions.length >= a.settings.maxOpen || a.cash - FEE_SOL < 0.01) break;
@@ -469,7 +505,8 @@ function tick() {
         continue;
       }
       const size = tradeSize(a, c.live.liquidity!, sol, now);
-      if (size > 0) open(a, c.live, size, strategy, target, now);
+      const target = strategy === 'model' ? c.signal.target! : scoreTarget();
+      if (size > 0) open(a, c.live, size, strategy, target, now, c.signal.at);
       else noteSkipped(a.userId, v.mint, 'size', now);
     }
   }
@@ -532,7 +569,8 @@ function skipNote(a: Account, strategy: PaperStrategy): string {
   const sk = [...(skipped.get(a.userId)?.values() ?? [])];
   const thin = sk.filter((x) => x.why === 'liquidity').length;
   const small = sk.filter((x) => x.why === 'size').length;
-  if (!thin && !small) return '';
+  const ran = sk.filter((x) => x.why === 'chase').length;
+  if (!thin && !small && !ran) return '';
   const coins = (n: number) => `${n} ${n === 1 ? 'coin' : 'coins'}`;
   const found = strategy === 'model' ? `the AI picked ${coins(w)}` : `${coins(w)} scored ${a.settings.scoreMin}+`;
   const parts: string[] = [];
@@ -540,7 +578,11 @@ function skipNote(a: Account, strategy: PaperStrategy): string {
   const minText = min >= 1e6 ? `$${Math.round(min / 1e5) / 10}M` : `$${Math.round(min / 1000)}K`;
   if (thin) parts.push(`${thin} had less liquidity than your ${minText} minimum`);
   if (small) parts.push(`${small} would have been a trade under 0.01 SOL (balance too low)`);
-  return ` In the last hour ${found}; ${parts.join(' and ')}, so the bot skipped ${thin + small === 1 ? 'it' : 'them'}.`;
+  const skips = parts.length ? `; ${parts.join(' and ')}, so the bot skipped ${thin + small === 1 ? 'it' : 'them'}` : '';
+  const chased = ran
+    ? ` ${ran === 1 ? '1 buy was' : `${ran} buys were`} cancelled because the price ran ${ML.maxChasePct}%+ above the pick before ${ran === 1 ? 'it' : 'they'} could land.`
+    : '';
+  return ` In the last hour ${found}${skips}.${chased}`;
 }
 
 function activity(a: Account): string {
@@ -548,10 +590,20 @@ function activity(a: Account): string {
   const model = modelForBot();
   const strategy = strategyFor(a, model);
   const holding = `Holding ${a.positions.length} of ${a.settings.maxOpen}.`;
-  if (!strategy) return `Waiting for the AI model to prove itself before trading (you chose "model only"). ${holding}`;
+  if (!modelLoaded()) return `Starting up… ${holding}`;
+  const why = notFollowingReason() ?? 'the AI model is not being followed';
+  if (!strategy && a.settings.mode !== 'auto') return `Not buying: ${why} (you chose "AI only"). ${holding}`;
+  if (!strategy) {
+    const r = model?.score;
+    const score =
+      r && r.trades >= ML.proven.minTrades
+        ? `buying on the MemeRadar score averaged ${r.avgReturn > 0 ? '+' : ''}${r.avgReturn}% per trade after fees in the latest test (it needs +${ML.proven.minAvgReturn}%)`
+        : 'the MemeRadar score made too few trades in the latest test to judge';
+    return `Not buying: ${why}, and ${score}. ${holding}`;
+  }
   if (strategy === 'score')
-    return `Trading on the MemeRadar score (${a.settings.scoreMin}+)${model?.scoreRiskMax != null ? ', skipping coins the crash model flags,' : ''} until the AI model proves itself. ${holding}${skipNote(a, strategy)}`;
-  return `Trading the AI model's picks (likely winners it doesn't expect to crash). ${holding}${skipNote(a, strategy)}`;
+    return `Trading on the MemeRadar score (${a.settings.scoreMin}+)${model?.scoreRiskMax != null ? ', skipping coins the crash model flags,' : ''} because ${why}. ${holding}${skipNote(a, strategy)}`;
+  return `Trading the AI model's picks at its 10-minute checks (likely winners it doesn't expect to crash). ${holding}${skipNote(a, strategy)}`;
 }
 
 export function accountView(a: Account, tradeLimit = 100): PaperAccountView {

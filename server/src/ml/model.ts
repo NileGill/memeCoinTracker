@@ -1,11 +1,11 @@
-import type { AiDriver, AiSignal, AiTarget, MlModelInfo, MlStatus, StrategyResult, TokenView } from '../../../shared/types';
+import type { AiDriver, AiTarget, MlLiveRecord, MlModelInfo, MlStatus, StrategyResult, TokenView } from '../../../shared/types';
 import { setViewDecorator } from '../engine/market';
 import { broadcast } from '../lib/bus';
 import { kvGet, kvSet } from '../lib/cache';
 import { ML, type Target } from './config';
-import { FEATURES, featurize, makeObs, NUM_FEATURES } from './features';
+import { FEATURES, featurize, hasDanger, makeObs, NUM_FEATURES, type Obs } from './features';
 import { auc, contributions, fitGbdt, importance, Pacer, predict, type GbdtModel } from './gbdt';
-import { borrowDataset, obsContext, OUT_AT, OUT_W, recorderStatus, type Dataset } from './recorder';
+import { borrowDataset, obsContext, OUT_AT, OUT_W, recorderStatus, setSnapshotJudge, type Dataset } from './recorder';
 
 /*
  * Training and using the model.
@@ -20,6 +20,11 @@ import { borrowDataset, obsContext, OUT_AT, OUT_W, recorderStatus, type Dataset 
  * picks the target, the confidence bar and the crash cutoff, and the newest 15% (never used for
  * any choice) is the honest test. The AI is only called proven, and only then followed by the
  * bot, when trades in that test period made money after fees.
+ *
+ * The bot trades exactly the way the test does: it decides at the same 10-minute snapshots, sets
+ * its target and stop from the price the coin was picked at, and cancels a buy whose price ran
+ * away before it landed. Every pick is also followed to the end like a test trade (its live
+ * record), and the bot stops following an AI whose recent live picks lose money.
  */
 
 const F = NUM_FEATURES;
@@ -28,8 +33,11 @@ const FEATURE_LABELS = FEATURES.map((f) => f.label);
 /** The deepest recorded loss level (50%): hitting it counts as a crash. */
 const CRASH_LEVEL = ML.slLevels.length - 1;
 
+/** Saved-model format. Version 4 models (tested before the bot traded exactly like the test) still load, then retrain at once. */
+const MODEL_V = 5;
+
 interface SavedModel {
-  v: 4;
+  v: 4 | 5;
   schema: number;
   /** Cost per side the test charged; a model tested at a different cost is retrained. */
   cost: number;
@@ -57,6 +65,9 @@ interface Calib {
 }
 
 let current: SavedModel | null = null;
+/** The saved model (if any) has been looked up, so `current` means what it says. */
+let loadedSaved = false;
+export const modelLoaded = () => loadedSaved;
 
 /** After this long without a successful retrain, a proven model stops being followed (it learned on old data). */
 const STALE_AFTER_MS = 3 * ML.trainEveryMs;
@@ -87,7 +98,8 @@ const COLLAPSED_PCT = -90;
 
 /**
  * What a bot trade with this target would have done from snapshot `i` (null = unusable row).
- * The buy lands at the next reading after the snapshot, not at the snapshot price.
+ * The buy lands at the next reading after the snapshot, not at the snapshot price. Like the bot,
+ * the target and stop are levels from the snapshot price (the price the coin was picked at).
  */
 function outcomeFor(d: Dataset, i: number, t: Target): Outcome | null {
   const o = i * OUT_W;
@@ -101,10 +113,9 @@ function outcomeFor(d: Dataset, i: number, t: Target): Outcome | null {
   // The coin collapsed before the buy landed: like the paper bot, buying into an emptied pool gets
   // ~nothing back. (Measuring from a price near zero once divided by zero and broke training.)
   if (entry <= COLLAPSED_PCT) return { y: 0, ret: -100, exitSec: slT >= 0 ? slT : horizonSec };
-  // Levels are measured from the snapshot price, but a real trade's target is set from its fill: it
-  // never sells for more than the target above what it paid, and can't lose more than everything.
-  const best = netFrom(t.tp, 0);
-  const netReturn = (grossFromSnapshot: number) => Math.min(best, Math.max(-100, netFrom(grossFromSnapshot, entry)));
+  // The bot's target and stop are the same levels from the picked price, so the result is that
+  // sale price against what the buy paid. It can't lose more than everything.
+  const netReturn = (grossFromSnapshot: number) => Math.max(-100, netFrom(grossFromSnapshot, entry));
   // Same tick counts as the stop (conservative). A target sale fills at the next reading after the
   // target is reached (capped at the target), so brief spikes don't count as full wins.
   if (tpT >= 0 && (slT < 0 || tpT < slT)) {
@@ -135,9 +146,11 @@ interface Sim extends StrategyResult {
 
 /**
  * Replay the bot over `rows` (time order): buy whenever `signal` fires on a tradeable coin it
- * isn't already holding or cooling down on, hold until the target, stop or time limit.
+ * isn't already holding or cooling down on, hold until the target, stop or time limit. A buy whose
+ * price ran up past the slippage limit before it landed doesn't happen (and doesn't block the coin).
+ * `log` collects each trade's return, in order.
  */
-function simulate(d: Dataset, rows: Int32Array, outs: (Outcome | null)[], signal: (k: number) => boolean): Sim {
+function simulate(d: Dataset, rows: Int32Array, outs: (Outcome | null)[], signal: (k: number) => boolean, log?: number[]): Sim {
   const busyUntil = new Map<number, number>();
   let trades = 0;
   let wins = 0;
@@ -151,9 +164,11 @@ function simulate(d: Dataset, rows: Int32Array, outs: (Outcome | null)[], signal
     if (!(d.liq[i] >= ML.tradeMinLiquidity) || d.danger[i]) continue;
     const m = d.mint[i];
     if ((busyUntil.get(m) ?? 0) > d.t[i]) continue;
+    if (d.out[i * OUT_W + OUT_AT.e1] > ML.maxChasePct) continue;
     busyUntil.set(m, d.t[i] + oc.exitSec * 1000 + ML.cooldownMs);
     trades++;
     sum += oc.ret;
+    log?.push(oc.ret);
     if (oc.ret > 0) {
       wins++;
       gw += oc.ret;
@@ -524,7 +539,7 @@ async function train() {
       topFeatures,
     };
     current = {
-      v: 4,
+      v: MODEL_V,
       schema: ML.schema,
       cost: ML.costPerSide,
       featureLabels: FEATURE_LABELS,
@@ -588,32 +603,106 @@ class Note extends Error {
 
 // ---------------------------------------------------------------- live predictions
 
-/** The models' read on a coin right now: win model probability `p`, crash chance `risk`. */
-function signalFor(v: TokenView, p: number, risk: number | null): AiSignal {
+/** Win chance and average result of coins rated like this in testing, and whether it's under the crash cap. */
+function rate(p: number, risk: number | null) {
   const c = current!;
-  const danger = v.flags.some((f) => f.severity === 'danger');
   const safeEnough = c.riskMax == null || (risk != null && risk <= c.riskMax);
   const table = safeEnough || !c.calib.risky ? c.calib.safe : c.calib.risky;
   const win = interp(table.p, table.win, p);
   const ev = interp(table.p, table.ev, p);
-  return {
-    win: round(Number.isFinite(win) ? win : p, 2),
-    ev: Number.isFinite(ev) ? round(ev, 1) : null,
-    risk: risk == null ? null : round(risk, 2),
-    pick: trusted(c.info) && p >= c.threshold && safeEnough && (v.liquidity ?? 0) >= ML.tradeMinLiquidity && !danger,
-  };
+  return { win: round(Number.isFinite(win) ? win : p, 2), ev: Number.isFinite(ev) ? round(ev, 1) : null, safeEnough };
 }
+
+/**
+ * A coin snapshot the bot can act on, the moment it's taken. The bot only buys at these: they're
+ * the moments the model was tested on, and the target and stop are set from `price`.
+ */
+export interface SnapshotSignal {
+  seq: number;
+  at: number;
+  mint: string;
+  /** The price the snapshot was taken at, and when that price reading arrived. */
+  price: number;
+  freshAt: number;
+  /** The AI picks it (and the bot is following the AI). */
+  pick: boolean;
+  /** For ordering several picks at once: the AI's test results for coins rated like this. */
+  rank: number;
+  target: AiTarget | null;
+  /** The MemeRadar score, and whether the crash model allows a score trade. */
+  score: number | null;
+  scoreSafe: boolean;
+}
+
+const signals: SnapshotSignal[] = [];
+let signalSeq = 0;
+/** Each coin's latest snapshot decision (the "pick" badge shows it until the next snapshot is due). */
+const decisions = new Map<string, { at: number; pick: boolean }>();
+
+/** Snapshots taken after `seq` (only the last minute's are kept), oldest first. */
+export function snapshotSignalsSince(seq: number): SnapshotSignal[] {
+  return signals.filter((s) => s.seq > seq);
+}
+
+setSnapshotJudge((obs: Obs, freshAt: number) => {
+  const now = obs.t;
+  while (signals.length && (now - signals[0].at > 60_000 || signals.length > 5_000)) signals.shift();
+  const c = current;
+  let aiPick = false;
+  let rank = 0;
+  let risk: number | null = null;
+  let recorded: number | null = null;
+  if (c) {
+    const x = new Float32Array(F);
+    featurize(obs, x);
+    const p = predict(c.gbdt, x);
+    risk = c.crash ? predict(c.crash, x) : null;
+    const r = rate(p, risk);
+    rank = (r.ev ?? 0) * 100 + r.win;
+    // The rule the test traded on: the bar, the crash cap, enough liquidity, no danger flags.
+    const picked = p >= c.threshold && r.safeEnough && (obs.liq ?? 0) >= ML.tradeMinLiquidity && !hasDanger(obs);
+    if (trusted(c.info)) {
+      recorded = picked ? ML.targets.findIndex((t) => t.tp === c.info.target.tp && t.sl === c.info.target.sl) : -1;
+      aiPick = picked && following();
+    }
+  }
+  const scoreRiskMax = c?.crash ? c.scoreRiskMax : null;
+  signals.push({
+    seq: ++signalSeq,
+    at: now,
+    mint: obs.mint,
+    price: obs.price,
+    freshAt,
+    pick: aiPick,
+    rank,
+    target: c ? c.info.target : null,
+    score: obs.score,
+    scoreSafe: scoreRiskMax == null || (risk != null && risk <= scoreRiskMax),
+  });
+  decisions.set(obs.mint, { at: now, pick: aiPick });
+  return recorded;
+});
 
 setViewDecorator((views) => {
   if (!current) return;
   const ctx = obsContext();
   const x = new Float32Array(F);
+  const now = Date.now();
   for (const v of views) {
     const obs = makeObs(v, ctx);
     if (!obs) continue;
     featurize(obs, x);
-    v.ai = signalFor(v, predict(current.gbdt, x), current.crash ? predict(current.crash, x) : null);
+    const risk = current.crash ? predict(current.crash, x) : null;
+    const r = rate(predict(current.gbdt, x), risk);
+    const d = decisions.get(v.mint);
+    v.ai = {
+      win: r.win,
+      ev: r.ev,
+      risk: risk == null ? null : round(risk, 2),
+      pick: Boolean(d && d.pick && now - d.at <= ML.sampleEveryMs + 30_000),
+    };
   }
+  for (const [mint, d] of decisions) if (now - d.at > 3 * ML.sampleEveryMs) decisions.delete(mint);
 });
 
 /** The strongest reasons behind a coin's rating, for the coin page. */
@@ -631,17 +720,87 @@ export function explain(v: TokenView): AiDriver[] | null {
     .slice(0, 8);
 }
 
+// ---------------------------------------------------------------- live record
+
 /**
- * What the bot needs from the models: is the AI trustworthy, what does it trade toward, and the
- * crash-chance cap to apply to score trades before then (null = none).
+ * The AI's picks since this was added, each followed to the end exactly like a test trade (same
+ * outcome rules, one trade per coin at a time, slippage limit). A pick's result is known an hour
+ * after it's made, so this trails by an hour.
  */
-export function modelForBot(): { proven: boolean; target: AiTarget; version: number; scoreRiskMax: number | null } | null {
+let live: MlLiveRecord | null = null;
+
+function computeLive() {
+  const { data: d, release } = borrowDataset();
+  try {
+    const rows: number[] = [];
+    for (let i = 0; i < d.n; i++) if (d.out[i * OUT_W + OUT_AT.pick] >= 0) rows.push(i);
+    rows.sort((a, b) => d.t[a] - d.t[b]);
+    const outs = rows.map((i) => {
+      const t = ML.targets[d.out[i * OUT_W + OUT_AT.pick]];
+      return t ? outcomeFor(d, i, t) : null;
+    });
+    const all: number[] = [];
+    const sim = simulate(d, Int32Array.from(rows), outs, () => true, all);
+    const since = Date.now() - 86_400_000 - ML.horizonMs;
+    const dayRows = rows.map((i, k) => k).filter((k) => d.t[rows[k]] >= since);
+    const day: number[] = [];
+    simulate(d, Int32Array.from(dayRows, (k) => rows[k]), dayRows.map((k) => outs[k]), () => true, day);
+    const summary = (r: number[]) => ({
+      trades: r.length,
+      winRate: r.length ? round(r.filter((v) => v > 0).length / r.length, 3) : 0,
+      avgReturn: r.length ? round(r.reduce((a, v) => a + v, 0) / r.length) : 0,
+    });
+    const recent = summary(all.slice(-ML.live.window));
+    live = {
+      from: rows.length ? d.t[rows[0]] : null,
+      ...summary(all),
+      totalReturn: round(sim.totalReturn, 1),
+      last24h: summary(day),
+      recent,
+      losing: recent.trades >= ML.live.minTrades && recent.avgReturn < ML.live.floor,
+    };
+  } finally {
+    release();
+  }
+}
+
+export const liveRecord = () => live;
+
+/** Why the bot isn't following the AI right now (null when it is). */
+export function notFollowingReason(): string | null {
+  if (!current) return 'the AI model is still collecting data';
+  if (!current.info.proven) return "the AI model hasn't passed its latest test";
+  if (stale(current.info)) return "the AI model hasn't retrained recently enough to trust";
+  if (live?.losing) return "the AI's recent live picks have been losing money";
+  return null;
+}
+
+/** Proven, recent, and its recent live picks aren't losing money: the bot follows it. */
+function following(): boolean {
+  return Boolean(current && trusted(current.info) && !live?.losing);
+}
+
+/**
+ * What the bot needs from the models: is it following the AI, what does it trade toward, the
+ * crash-chance cap for score trades (null = none), and how the score strategy did in the latest
+ * test (null = no test yet).
+ */
+export function modelForBot(): {
+  proven: boolean;
+  target: AiTarget;
+  version: number;
+  scoreRiskMax: number | null;
+  score: StrategyResult | null;
+} | null {
   if (!current) return null;
+  const i = current.info;
+  const scoreRiskMax = current.crash ? current.scoreRiskMax : null;
   return {
-    proven: trusted(current.info),
-    target: current.info.target,
-    version: current.info.version,
-    scoreRiskMax: current.crash ? current.scoreRiskMax : null,
+    proven: following(),
+    target: i.target,
+    version: i.version,
+    scoreRiskMax,
+    score: scoreRiskMax != null ? (i.scoreFiltered ?? i.baseline) : i.baseline,
   };
 }
 
@@ -663,6 +822,11 @@ export function mlStatus(): MlStatus {
     state = 'unproven';
     const hours = Math.round((Date.now() - info.version) / 3_600_000);
     message = `Passed its test, but it was trained ${hours} hours ago and hasn't retrained since, so the bot isn't following it until a retrain works.`;
+  } else if (info.proven && live?.losing) {
+    state = 'unproven';
+    message =
+      `Passed its test, but its last ${live.recent.trades} live picks averaged ${live.recent.avgReturn}% after fees, so the bot has stopped ` +
+      `following it until they recover (picks are still followed and counted meanwhile).`;
   } else if (info.proven) {
     state = 'ready';
     message = `Proven on the most recent data it never trained on: ${info.test.trades} test trades averaged ${info.test.avgReturn > 0 ? '+' : ''}${info.test.avgReturn}% after fees.`;
@@ -686,8 +850,9 @@ export function mlStatus(): MlStatus {
     trainedAt: info?.version ?? null,
     nextTrainingAt: training || !ready.ok ? null : next,
     model: info,
-    following: Boolean(info && trusted(info)),
+    following: following(),
     lastAttempt: lastResult,
+    live,
   };
 }
 
@@ -706,7 +871,7 @@ export async function startModel() {
   try {
     const saved = await kvGet<SavedModel>(ML.modelKey);
     if (
-      saved?.v === 4 &&
+      (saved?.v === 4 || saved?.v === MODEL_V) &&
       saved.cost === ML.costPerSide &&
       saved.schema === ML.schema &&
       JSON.stringify(saved.featureLabels) === JSON.stringify(FEATURE_LABELS) &&
@@ -718,10 +883,16 @@ export async function startModel() {
   } catch (e) {
     console.warn('[ml] could not load the saved model:', e instanceof Error ? e.message : e);
   }
+  loadedSaved = true;
   setInterval(() => {
-    if (training) return;
+    try {
+      computeLive();
+    } catch (e) {
+      console.error('[ml] live record failed:', e);
+    }
+    if (training) return broadcastStatus();
     const now = Date.now();
-    const due = !current || now - current.info.version >= ML.trainEveryMs;
+    const due = !current || current.v !== MODEL_V || now - current.info.version >= ML.trainEveryMs;
     // After a failed attempt, wait half a cycle before trying again.
     if (due && now - lastAttempt >= ML.trainEveryMs / 2 && readyToTrain().ok) void train();
     else broadcastStatus();
