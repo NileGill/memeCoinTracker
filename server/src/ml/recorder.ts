@@ -10,6 +10,10 @@ import { decodeObs, encodeObs, featurize, hasDanger, makeObs, NUM_FEATURES, OBS_
  * snapshotted when it appears and every 10 minutes after, and each snapshot's price is then
  * followed for an hour to record what actually happened: which profit and loss levels it hit
  * first, and when. Coins that rug are followed to the end, so losses aren't quietly dropped.
+ *
+ * Price alone misses one common rug: when the creator pulls the pool's liquidity, the price just
+ * freezes (no one can trade), and an hour later it looked like a small win. So the pool's depth is
+ * followed too, and a pool that empties counts as a total loss.
  */
 
 const TICK_MS = 5_000;
@@ -19,6 +23,13 @@ const CHECKPOINTS = [0.25, 0.5, 1];
 /** A coin whose price feed stopped for this long, while the feeds work for other coins, is treated as rugged. */
 const GONE_AFTER_MS = 10 * 60_000;
 const GONE_RETURN = -90;
+/**
+ * A pool whose depth falls under this share of what it was at the snapshot has been emptied: its
+ * liquidity was pulled. (Even a 90% price crash leaves about a third of a pool's depth.) It must
+ * stay that low this long, so a one-off bad reading doesn't count.
+ */
+export const PULLED_SHARE = 0.1;
+export const PULLED_AFTER_MS = 30_000;
 
 // ---------------------------------------------------------------- live price tape
 
@@ -176,6 +187,12 @@ export interface Outcome {
   /** 1 = our own data had a hole (outage): excluded from training. */
   gap: number;
   /**
+   * 1 = the pool's liquidity was pulled (also counted as `gone`, with the loss levels hit at -100%).
+   * Missing in snapshots recorded before this was added: for those, a price frozen through the
+   * second half hour stands in for it (see model.ts).
+   */
+  pulled?: number;
+  /**
    * What the AI decided at this snapshot, while it was proven and up to date: the index in ML.targets
    * it picked the coin for, or -1 if it passed (null: no such AI at the time). Its live record is
    * built from these. Missing in snapshots recorded before this was added.
@@ -183,7 +200,7 @@ export interface Outcome {
   pick?: number | null;
 }
 
-const OUT_FIELDS = ['tp', 'tpn', 'e1', 'sl', 'slr', 'rq', 'hi', 'lo', 'last', 'gone', 'gap', 'pick'] as const;
+const OUT_FIELDS = ['tp', 'tpn', 'e1', 'sl', 'slr', 'rq', 'hi', 'lo', 'last', 'gone', 'gap', 'pick', 'pulled'] as const;
 
 interface Open {
   obs: Obs;
@@ -195,6 +212,9 @@ interface Open {
   tpSeenAt: number[];
   /** The price reading the snapshot was taken from. */
   seenAt: number;
+  /** Pool depth at the snapshot (same measure as later readings), and since when it has looked emptied. */
+  depth0: number | null;
+  emptySince: number | null;
 }
 
 const open: Open[] = [];
@@ -240,6 +260,8 @@ function sample(now: number) {
       t0: now,
       lastR: 0,
       staleSince: null,
+      depth0: info.liquidityLow,
+      emptySince: null,
       tpSeenAt: ML.tpLevels.map(() => 0),
       seenAt: info.freshAt,
       out: {
@@ -255,11 +277,22 @@ function sample(now: number) {
         gone: 0,
         gap: 0,
         pick,
+        pulled: 0,
       },
     });
     openPerMint.set(v.mint, (openPerMint.get(v.mint) ?? 0) + 1);
   }
   for (const [mint, t] of lastSampled) if (now - t > ML.sampleEveryMs * 4) lastSampled.delete(mint);
+}
+
+/** The pool has been far shallower than at the snapshot for a while: its liquidity was pulled. */
+function emptied(o: Open, depth: number | null, now: number): boolean {
+  if (depth == null || o.depth0 == null || !(o.depth0 > 0) || depth >= o.depth0 * PULLED_SHARE) {
+    o.emptySince = null;
+    return false;
+  }
+  o.emptySince ??= now;
+  return now - o.emptySince >= PULLED_AFTER_MS;
 }
 
 function follow(now: number) {
@@ -274,6 +307,20 @@ function follow(now: number) {
     if (!info) {
       // Only possible if the coin was dropped despite the hold: we can't know what happened.
       o.out.gap = 1;
+      done = true;
+    } else if (price != null && price > 0 && now - info.freshAt < 120_000 && emptied(o, info.liquidityLow, now)) {
+      // The pool's liquidity was pulled: nothing can be sold from here on, whatever the price says.
+      o.out.pulled = 1;
+      o.out.gone = 1;
+      o.lastR = -100;
+      o.out.lo = -100;
+      o.out.last = sec;
+      ML.slLevels.forEach((_, k) => {
+        if (o.out.sl[k] < 0) {
+          o.out.sl[k] = sec;
+          o.out.slr[k] = -100;
+        }
+      });
       done = true;
     } else if (price != null && price > 0 && now - info.freshAt < 120_000) {
       o.staleSince = null;
@@ -339,12 +386,12 @@ function follow(now: number) {
 
 // ---------------------------------------------------------------- in-memory training set
 
-/** Values stored per row for outcomes: tp, sl, slr, rq, hi, lo, last, gone, gap, tpn, e1, pick. */
+/** Values stored per row for outcomes: tp, sl, slr, rq, hi, lo, last, gone, gap, tpn, e1, pick, pulled. */
 const NT = ML.tpLevels.length;
 const NS = ML.slLevels.length;
 const NQ = CHECKPOINTS.length;
 const BASE_W = NT + 2 * NS + NQ;
-export const OUT_W = BASE_W + 5 + NT + 2;
+export const OUT_W = BASE_W + 5 + NT + 3;
 export const OUT_AT = {
   tp: 0,
   sl: NT,
@@ -359,6 +406,8 @@ export const OUT_AT = {
   e1: BASE_W + 5 + NT,
   /** NaN when no AI was being followed (or recorded before this existed). */
   pick: BASE_W + 5 + NT + 1,
+  /** 1 = liquidity pulled, 0 = not, NaN = recorded before pulls were tracked. */
+  pulled: BASE_W + 5 + NT + 2,
 };
 
 const F = NUM_FEATURES;
@@ -432,6 +481,7 @@ function writeRow(obs: Obs, out: Outcome) {
   for (let k = 0; k < NT; k++) data.out[o + OUT_AT.tpn + k] = out.tpn?.[k] ?? NaN;
   data.out[o + OUT_AT.e1] = out.e1 ?? NaN;
   data.out[o + OUT_AT.pick] = out.pick ?? NaN;
+  data.out[o + OUT_AT.pulled] = out.pulled ?? NaN;
   out.sl.forEach((v, k) => (data.out[o + OUT_AT.sl + k] = v));
   out.slr.forEach((v, k) => (data.out[o + OUT_AT.slr + k] = v ?? NaN));
   out.rq.forEach((v, k) => (data.out[o + OUT_AT.rq + k] = v ?? NaN));
@@ -620,17 +670,38 @@ export function startRecorder() {
   });
 }
 
-/** Share of snapshots with holes in their price data (unusable) or a dead feed (rug), recent vs older. */
+/**
+ * Snapshots with holes in their price data (unusable), a dead feed or pulled liquidity (rugs), and,
+ * among those recorded before pulls were tracked, a price frozen through the second half hour (taken
+ * as a pull), recent vs older.
+ */
 export function dataQuality() {
   const day = Date.now() - 86_400_000;
-  const q = { last24h: { rows: 0, holes: 0, gone: 0 }, older: { rows: 0, holes: 0, gone: 0 } };
+  const blank = () => ({ rows: 0, holes: 0, gone: 0, pulled: 0, frozen: 0 });
+  const q = { last24h: blank(), older: blank() };
   for (let i = 0; i < data.n; i++) {
     const b = data.t[i] >= day ? q.last24h : q.older;
+    const o = i * OUT_W;
     b.rows++;
-    if (data.out[i * OUT_W + OUT_AT.gap]) b.holes++;
-    if (data.out[i * OUT_W + OUT_AT.gone]) b.gone++;
+    if (data.out[o + OUT_AT.gap]) b.holes++;
+    if (data.out[o + OUT_AT.gone]) b.gone++;
+    if (data.out[o + OUT_AT.pulled] === 1) b.pulled++;
+    if (frozenOld(data, i)) b.frozen++;
   }
   return q;
+}
+
+/**
+ * A snapshot recorded before pulled liquidity was tracked, whose price was exactly the same at 30 and
+ * 60 minutes: no one traded for half an hour, the mark of a pool whose liquidity was pulled (all ten
+ * zero-liquidity exits found on 2026-10-03 looked like this). Counted as a pull.
+ */
+export function frozenOld(d: Dataset, i: number): boolean {
+  const o = i * OUT_W;
+  if (!Number.isNaN(d.out[o + OUT_AT.pulled]) || d.out[o + OUT_AT.gap] || d.out[o + OUT_AT.gone]) return false;
+  const half = d.out[o + OUT_AT.rq + 1];
+  const end = d.out[o + OUT_AT.rq + 2];
+  return Number.isFinite(half) && half === end;
 }
 
 /** False while most price feeds are down (an outage, not a rug). */

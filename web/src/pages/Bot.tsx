@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { MlLiveRecord, MlModelInfo, MlStatus, PaperAccountView, PaperBucket, PaperPosition, PaperSettings, PaperTrade, StrategyResult, TokenView } from '../../../shared/types';
+import type { MlLiveHour, MlLiveRecord, MlModelInfo, MlStatus, PaperAccountView, PaperBucket, PaperPosition, PaperSettings, PaperTrade, StrategyResult, TokenView } from '../../../shared/types';
 import { Icon } from '../components/Icon';
 import { AiChip, Empty, Pct, TokenIcon, useTick } from '../components/common';
 import { botApi } from '../lib/bot';
@@ -137,6 +137,45 @@ function LiveRecord({ live }: { live: MlLiveRecord }) {
       ) : (
         <div className="dim" style={{ fontSize: 12.5 }}>No finished live picks yet.</div>
       )}
+      {live.hours?.length > 0 && <LiveHours hours={live.hours} />}
+    </div>
+  );
+}
+
+/** The AI's picks hour by hour, so a quiet bot explains itself: was there an AI to follow, and did it pick anything? */
+function LiveHours({ hours }: { hours: MlLiveHour[] }) {
+  const max = Math.max(1, ...hours.map((h) => h.picks));
+  const label = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: 'numeric' });
+  const H = 44;
+  return (
+    <div className="col" style={{ gap: 4, marginTop: 4 }}>
+      <div className="dim" style={{ fontSize: 12 }}>
+        AI picks per hour, last 24 hours: <span style={{ color: 'var(--accent-2)' }}>■</span> followed by the bot ·{' '}
+        <span style={{ color: 'var(--dim)' }}>■</span> not followed (no AI passed its test) · <span style={{ color: 'var(--red)' }}>■</span> paused by
+        the live record. Hover a bar for details; the last hour is still filling in.
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(24, minmax(0, 1fr))', gap: 2, height: H, alignItems: 'end' }}>
+        {hours.map((h) => {
+          const off = h.tracked && h.snapshots > 0 && h.followed < h.snapshots / 2;
+          const color = off ? 'var(--dim)' : h.paused ? 'var(--red)' : 'var(--accent-2)';
+          const title =
+            `${label(h.at)}: ` +
+            (h.snapshots === 0
+              ? 'no data yet'
+              : !h.tracked
+                ? 'before the AI was tracked hour by hour'
+                : off
+                ? `the bot wasn't following the AI (no AI had passed its test)`
+                : `${h.picks} ${h.picks === 1 ? 'pick' : 'picks'} (${h.deep} with $20K+ liquidity, ${h.ran} ran 10%+ before a buy could land)${h.paused ? '; paused by the live record' : ''}`) +
+            (h.complete ? '' : ' (still filling in)');
+          const height = h.snapshots === 0 || !h.tracked ? 2 : off ? H : Math.max(3, (h.picks / max) * H);
+          return <div key={h.at} title={title} style={{ height, background: color, opacity: off ? 0.35 : h.complete ? 1 : 0.55, borderRadius: 2 }} />;
+        })}
+      </div>
+      <div className="row dim" style={{ justifyContent: 'space-between', fontSize: 11 }}>
+        <span>{label(hours[0].at)}</span>
+        <span>now</span>
+      </div>
     </div>
   );
 }
@@ -497,7 +536,7 @@ const REASON: Record<PaperTrade['reason'], string> = {
   sl: 'stop hit',
   time: 'time limit',
   manual: 'sold by you',
-  gone: 'rugged / no price',
+  gone: 'rugged: pool emptied or price gone',
   reset: 'reset',
 };
 
@@ -709,7 +748,7 @@ const REASON_LABEL: Record<string, string> = {
   sl: 'Hit the stop',
   time: 'Sold at the time limit',
   manual: 'Sold by you',
-  gone: 'Rugged / price vanished',
+  gone: 'Rugged (pool emptied or price vanished)',
   reset: 'Reset',
 };
 

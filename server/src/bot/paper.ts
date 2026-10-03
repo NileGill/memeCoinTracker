@@ -18,7 +18,7 @@ import { connectedUsers, sendToUser } from '../lib/bus';
 import { ML } from '../ml/config';
 import { modelForBot, modelLoaded, notFollowingReason, snapshotSignalsSince, type SnapshotSignal } from '../ml/model';
 import { jupPrices } from '../sources/jupiter';
-import { feedsOk } from '../ml/recorder';
+import { feedsOk, PULLED_AFTER_MS, PULLED_SHARE } from '../ml/recorder';
 
 /*
  * Paper trading: a bot per account that trades fake SOL on the live market, 24/7 on the
@@ -38,8 +38,9 @@ import { feedsOk } from '../ml/recorder';
  *  - It trades exactly the way the AI was tested: it buys only at the AI's 10-minute snapshots,
  *    measures the target and stop from the price the coin was picked at, and cancels a buy whose
  *    price ran up past the slippage limit before it landed.
- *  - Every swap pays a 1% pool/router fee and a network fee; a coin whose price feed dies
- *    counts as a total loss.
+ *  - Every swap pays a 1% pool/router fee and a network fee; a coin whose price feed dies, or
+ *    whose pool is emptied (liquidity pulled: the price freezes but nothing can be sold), counts
+ *    as a total loss.
  */
 
 const TICK_MS = 5_000;
@@ -246,6 +247,7 @@ function fill(a: Account, pos: PaperPosition, l: Live, sol: number, now: number)
     noteSkipped(a.userId, pos.mint, 'chase', now);
     return cancel(a, pos, false);
   }
+  const picked = pos.entryLiquidity ?? 0;
   const liquidity = l.liquidity ?? pos.entryLiquidity ?? 0;
   const size = pos.costSol - FEE_SOL;
   const gotUsd = swapOut(size * sol * (1 - FEE), liquidity);
@@ -261,6 +263,8 @@ function fill(a: Account, pos: PaperPosition, l: Live, sol: number, now: number)
   a.feesSol += (size * sol - gotUsd) / sol + FEE_SOL;
   touchAccount(a);
   emit(a, { type: 'open', position: pos });
+  // The pool was emptied between the pick and the buy: the SOL went into a pool with nothing in it.
+  if (picked > 0 && liquidity < picked * PULLED_SHARE) close(a, pos, 'gone', l.price, now, sol);
 }
 
 /** A buy that never got a price to fill at, ran past the slippage limit, or you cancelled: give the SOL back. */
@@ -300,6 +304,7 @@ function close(a: Account, pos: PaperPosition, why: PaperExit, seenPrice: number
   a.cash = r6(a.cash + proceeds);
   a.positions = a.positions.filter((p) => p.id !== pos.id);
   delete a.missingSince[pos.id];
+  emptySince.delete(pos.id);
   const pnlSol = proceeds - pos.costSol;
   const pnlPct = (proceeds / pos.costSol - 1) * 100;
   const trade: PaperTrade = {
@@ -369,6 +374,9 @@ async function sellNow(userId: string, posId: string, seenPrice: number) {
   close(a, pos, 'tp', price, Date.now(), sol);
 }
 
+/** Since when each open position's pool has looked emptied (memory only: re-detected after a restart). */
+const emptySince = new Map<string, number>();
+
 /** Sell positions that hit their target, stop, or time limit. */
 function manage(a: Account, now: number, sol: number) {
   for (const pos of [...a.positions]) {
@@ -385,6 +393,17 @@ function manage(a: Account, now: number, sol: number) {
       pos.lastPrice = l.price;
       pos.lastPriceAt = now;
       if (l.liquidity != null) pos.lastLiquidity = Math.round(l.liquidity);
+      // The pool was emptied (liquidity pulled): the price freezes but nothing can be sold. Count it
+      // as the total loss it is now, instead of an hour later at the time limit, and free the slot.
+      if (l.liquidity != null && pos.entryLiquidity && l.liquidity < pos.entryLiquidity * PULLED_SHARE) {
+        const since = emptySince.get(pos.id) ?? now;
+        emptySince.set(pos.id, since);
+        if (now - since >= PULLED_AFTER_MS) {
+          emptySince.delete(pos.id);
+          close(a, pos, 'gone', l.price, now, sol);
+          continue;
+        }
+      } else emptySince.delete(pos.id);
       // From the pick price, like the test: the target is +X% and the stop -Y% from there.
       const move = (l.price / refPrice(pos) - 1) * 100;
       // Target seen: the sale lands at the next fresh reading, like a real sell sent at that moment

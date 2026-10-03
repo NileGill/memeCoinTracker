@@ -1,18 +1,18 @@
-import type { AiDriver, AiTarget, MlLiveRecord, MlModelInfo, MlStatus, StrategyResult, TokenView } from '../../../shared/types';
+import type { AiDriver, AiTarget, MlLiveHour, MlLiveRecord, MlModelInfo, MlStatus, StrategyResult, TokenView } from '../../../shared/types';
 import { setViewDecorator } from '../engine/market';
 import { broadcast } from '../lib/bus';
 import { kvGet, kvSet } from '../lib/cache';
 import { ML, type Target } from './config';
 import { FEATURES, featurize, hasDanger, makeObs, NUM_FEATURES, type Obs } from './features';
 import { auc, contributions, fitGbdt, importance, Pacer, predict, type GbdtModel } from './gbdt';
-import { borrowDataset, obsContext, OUT_AT, OUT_W, recorderStatus, setSnapshotJudge, type Dataset } from './recorder';
+import { borrowDataset, frozenOld, obsContext, OUT_AT, OUT_W, recorderStatus, setSnapshotJudge, type Dataset } from './recorder';
 
 /*
  * Training and using the model.
  *
  * Two models answer two questions about a coin right now:
  *   1. "If I bought it, would it hit +X% before -Y% within the hour?"  (the win model)
- *   2. "Will it crash 50%+ (or its price vanish) within the hour?"      (the crash model)
+ *   2. "Will it crash 50%+ (or its price vanish, or its liquidity be pulled) within the hour?"  (the crash model)
  * The first alone can't tell a -15% stop from a -100% rug, and rugs gap straight through any
  * stop, so the bot only buys coins the first model likes AND the second doesn't flag.
  *
@@ -33,11 +33,14 @@ const FEATURE_LABELS = FEATURES.map((f) => f.label);
 /** The deepest recorded loss level (50%): hitting it counts as a crash. */
 const CRASH_LEVEL = ML.slLevels.length - 1;
 
-/** Saved-model format. Version 4 models (tested before the bot traded exactly like the test) still load, then retrain at once. */
-const MODEL_V = 5;
+/**
+ * Saved-model format. Older versions still load, then retrain at once: 4 was tested before the bot
+ * traded exactly like the test, 5 before pulled liquidity counted as a total loss.
+ */
+const MODEL_V = 6;
 
 interface SavedModel {
-  v: 4 | 5;
+  v: 4 | 5 | 6;
   schema: number;
   /** Cost per side the test charged; a model tested at a different cost is retrained. */
   cost: number;
@@ -126,16 +129,20 @@ function outcomeFor(d: Dataset, i: number, t: Target): Outcome | null {
     const r = d.out[o + OUT_AT.slr + si];
     return { y: 0, ret: netReturn(Number.isNaN(r) ? -t.sl : r), exitSec: slT };
   }
+  // Liquidity pulled in a snapshot recorded before pulls were tracked: the price froze, so it never
+  // reached the target or the stop, and at the time limit there was nothing to sell into. (Newer
+  // snapshots record the pull as a -100% stop.)
+  if (frozenOld(d, i)) return { y: 0, ret: -100, exitSec: horizonSec };
   const end = d.out[o + OUT_AT.rq + 2];
   if (Number.isNaN(end)) return null;
   return { y: 0, ret: netReturn(end), exitSec: horizonSec };
 }
 
-/** 1 if the coin fell 50%+ at some point in the hour or its price feed died, 0 if not, null if unusable. */
+/** 1 if the coin fell 50%+ at some point in the hour, its price feed died or its liquidity was pulled; 0 if not; null if unusable. */
 function crashFor(d: Dataset, i: number): number | null {
   const o = i * OUT_W;
   if (d.out[o + OUT_AT.gap]) return null;
-  return d.out[o + OUT_AT.gone] || d.out[o + OUT_AT.sl + CRASH_LEVEL] >= 0 ? 1 : 0;
+  return d.out[o + OUT_AT.gone] || d.out[o + OUT_AT.sl + CRASH_LEVEL] >= 0 || frozenOld(d, i) ? 1 : 0;
 }
 
 // ---------------------------------------------------------------- backtest
@@ -148,9 +155,15 @@ interface Sim extends StrategyResult {
  * Replay the bot over `rows` (time order): buy whenever `signal` fires on a tradeable coin it
  * isn't already holding or cooling down on, hold until the target, stop or time limit. A buy whose
  * price ran up past the slippage limit before it landed doesn't happen (and doesn't block the coin).
- * `log` collects each trade's return, in order.
+ * `log` collects each trade's snapshot time and return, in order.
  */
-function simulate(d: Dataset, rows: Int32Array, outs: (Outcome | null)[], signal: (k: number) => boolean, log?: number[]): Sim {
+function simulate(
+  d: Dataset,
+  rows: Int32Array,
+  outs: (Outcome | null)[],
+  signal: (k: number) => boolean,
+  log?: { t: number; ret: number }[],
+): Sim {
   const busyUntil = new Map<number, number>();
   let trades = 0;
   let wins = 0;
@@ -168,7 +181,7 @@ function simulate(d: Dataset, rows: Int32Array, outs: (Outcome | null)[], signal
     busyUntil.set(m, d.t[i] + oc.exitSec * 1000 + ML.cooldownMs);
     trades++;
     sum += oc.ret;
-    log?.push(oc.ret);
+    log?.push({ t: d.t[i], ret: oc.ret });
     if (oc.ret > 0) {
       wins++;
       gw += oc.ret;
@@ -749,17 +762,22 @@ function computeLive() {
       const t = ML.targets[d.out[i * OUT_W + OUT_AT.pick]];
       return t ? outcomeFor(d, i, t) : null;
     });
-    const all: number[] = [];
+    const all: { t: number; ret: number }[] = [];
     const sim = simulate(d, Int32Array.from(rows), outs, () => true, all);
-    const since = Date.now() - 86_400_000 - ML.horizonMs;
+    const now = Date.now();
+    const since = now - 86_400_000 - ML.horizonMs;
     const dayRows = rows.map((i, k) => k).filter((k) => d.t[rows[k]] >= since);
-    const day: number[] = [];
+    const day: { t: number; ret: number }[] = [];
     simulate(d, Int32Array.from(dayRows, (k) => rows[k]), dayRows.map((k) => outs[k]), () => true, day);
-    const summary = (r: number[]) => ({
+    const summary = (r: { ret: number }[]) => ({
       trades: r.length,
-      winRate: r.length ? round(r.filter((v) => v > 0).length / r.length, 3) : 0,
-      avgReturn: r.length ? round(r.reduce((a, v) => a + v, 0) / r.length) : 0,
+      winRate: r.length ? round(r.filter((x) => x.ret > 0).length / r.length, 3) : 0,
+      avgReturn: r.length ? round(r.reduce((a, x) => a + x.ret, 0) / r.length) : 0,
     });
+    const losingAmong = (r: { ret: number }[]) => {
+      const s = summary(r.slice(-ML.live.window));
+      return s.trades >= ML.live.minTrades && s.avgReturn < ML.live.floor;
+    };
     const recent = summary(all.slice(-ML.live.window));
     live = {
       from: rows.length ? d.t[rows[0]] : null,
@@ -767,7 +785,8 @@ function computeLive() {
       totalReturn: round(sim.totalReturn, 1),
       last24h: summary(day),
       recent,
-      losing: recent.trades >= ML.live.minTrades && recent.avgReturn < ML.live.floor,
+      losing: losingAmong(all),
+      hours: hourly(d, now, all, losingAmong),
     };
   } finally {
     release();
@@ -783,6 +802,49 @@ export function notFollowingReason(): string | null {
   if (stale(current.info)) return "the AI model hasn't retrained recently enough to trust";
   if (live?.losing) return "the AI's recent live picks have been losing money";
   return null;
+}
+
+/**
+ * The last 24 hours, hour by hour: how many coins were checked, whether a proven AI was being
+ * followed, how many it picked, and whether its live record had paused the bot. Answers "why did
+ * my bot stop buying?". Snapshots join the data when their hour of following ends, so the latest
+ * hour is incomplete.
+ */
+function hourly(d: Dataset, now: number, trades: { t: number; ret: number }[], losingAmong: (r: { ret: number }[]) => boolean): MlLiveHour[] {
+  const H = ML.fast ? 5 * 60_000 : 3_600_000;
+  const first = Math.floor(now / H) * H - 23 * H;
+  const hours: MlLiveHour[] = Array.from({ length: 24 }, (_, k) => ({
+    at: first + k * H,
+    snapshots: 0,
+    followed: 0,
+    picks: 0,
+    deep: 0,
+    ran: 0,
+    paused: false,
+    complete: first + (k + 1) * H <= now - ML.horizonMs,
+    tracked: true,
+  }));
+  // Decisions have been recorded since 2026-10-02; hours before the first one can't say whether an AI was followed.
+  let firstTracked = Infinity;
+  for (let i = 0; i < d.n; i++) if (!Number.isNaN(d.out[i * OUT_W + OUT_AT.pick]) && d.t[i] < firstTracked) firstTracked = d.t[i];
+  for (const h of hours) h.tracked = h.at + H > firstTracked;
+  for (let i = 0; i < d.n; i++) {
+    const k = Math.floor((d.t[i] - first) / H);
+    if (k < 0 || k >= 24) continue;
+    const h = hours[k];
+    const o = i * OUT_W;
+    const pick = d.out[o + OUT_AT.pick];
+    h.snapshots++;
+    if (!Number.isNaN(pick)) h.followed++;
+    if (pick >= 0) {
+      h.picks++;
+      if (d.liq[i] >= 20_000) h.deep++;
+      if (d.out[o + OUT_AT.e1] > ML.maxChasePct) h.ran++;
+    }
+  }
+  // Paused by the live record at the end of the hour: only picks whose hour had run out by then count.
+  for (const h of hours) h.paused = losingAmong(trades.filter((x) => x.t + ML.horizonMs <= h.at + H));
+  return hours;
 }
 
 /** Proven, recent, and its recent live picks aren't losing money: the bot follows it. */
@@ -881,7 +943,7 @@ export async function startModel() {
   try {
     const saved = await kvGet<SavedModel>(ML.modelKey);
     if (
-      (saved?.v === 4 || saved?.v === MODEL_V) &&
+      (saved?.v === 4 || saved?.v === 5 || saved?.v === MODEL_V) &&
       saved.cost === ML.costPerSide &&
       saved.schema === ML.schema &&
       JSON.stringify(saved.featureLabels) === JSON.stringify(FEATURE_LABELS) &&

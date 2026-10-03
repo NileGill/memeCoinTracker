@@ -192,6 +192,28 @@ export interface MlLiveRecord extends MlLiveSummary {
   last24h: MlLiveSummary;
   recent: MlLiveSummary;
   losing: boolean;
+  /** The last 24 hours, oldest first. */
+  hours: MlLiveHour[];
+}
+
+/** One hour of the AI's activity. */
+export interface MlLiveHour {
+  /** Start of the hour. */
+  at: number;
+  /** Coins checked (10-minute snapshots). */
+  snapshots: number;
+  /** Of those, taken while a proven, up-to-date AI was in use (0 = the bot wasn't following any AI). */
+  followed: number;
+  /** Coins the AI picked; of those, with $20K+ liquidity, and whose price ran past the slippage limit before a buy could land. */
+  picks: number;
+  deep: number;
+  ran: number;
+  /** The live record had paused the bot by the end of the hour. */
+  paused: boolean;
+  /** Every snapshot from this hour has finished its hour of following (later hours are still filling in). */
+  complete: boolean;
+  /** The AI's decisions were being recorded by then (false for hours before that started). */
+  tracked: boolean;
 }
 
 // ---- Paper trading bot
