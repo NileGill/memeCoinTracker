@@ -627,8 +627,8 @@ function BotDashboard({ a }: { a: PaperAccountView }) {
             Running since {fmtWhen(a.createdAt)}. Cash {fmtSol(a.cash)}. Every buy and sell pays a 1% fee, a network fee and slippage from
             the coin's pool size; trades are capped at {a.settings.maxPoolPct}% of a pool and {fmtSol(a.settings.maxTradeSol)}. Like the AI's test, it buys
             at the AI's 10-minute checks, sets the target and stop from the price at the pick, and cancels a buy if the price runs 10%+ higher before it
-            lands. It never buys a coin whose pool liquidity its creator can pull (checked with RugCheck). Targets fill at the target price, never at
-            a spike; stops fill at the price actually seen.
+            lands. It only buys coins launched on pump.fun, whose pool liquidity can't be pulled by their creator (double-checked with RugCheck).
+            Targets fill at the target price, never at a spike; stops fill at the price actually seen.
           </div>
         </div>
       </section>

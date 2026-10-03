@@ -3,7 +3,7 @@ import { setViewDecorator } from '../engine/market';
 import { broadcast } from '../lib/bus';
 import { kvGet, kvSet } from '../lib/cache';
 import { ML, type Target } from './config';
-import { FEATURES, featurize, hasDanger, makeObs, NUM_FEATURES, type Obs } from './features';
+import { FEATURES, featurize, hasDanger, lockedPool, makeObs, NUM_FEATURES, type Obs } from './features';
 import { auc, contributions, fitGbdt, importance, Pacer, predict, type GbdtModel } from './gbdt';
 import { borrowDataset, frozenOld, obsContext, OUT_AT, OUT_W, recorderStatus, setSnapshotJudge, type Dataset } from './recorder';
 
@@ -35,12 +35,13 @@ const CRASH_LEVEL = ML.slLevels.length - 1;
 
 /**
  * Saved-model format. Older versions still load, then retrain at once: 4 was tested before the bot
- * traded exactly like the test, 5 before pulled liquidity counted as a total loss.
+ * traded exactly like the test, 5 before pulled liquidity counted as a total loss, 6 on coins whose
+ * liquidity could be pulled (which the bot no longer buys).
  */
-const MODEL_V = 6;
+const MODEL_V = 7;
 
 interface SavedModel {
-  v: 4 | 5 | 6;
+  v: 4 | 5 | 6 | 7;
   schema: number;
   /** Cost per side the test charged; a model tested at a different cost is retrained. */
   cost: number;
@@ -174,7 +175,7 @@ function simulate(
     const i = rows[k];
     const oc = outs[k];
     if (!oc || !signal(k)) continue;
-    if (!(d.liq[i] >= ML.tradeMinLiquidity) || d.danger[i]) continue;
+    if (!(d.liq[i] >= ML.tradeMinLiquidity) || d.danger[i] || !d.locked[i]) continue;
     const m = d.mint[i];
     if ((busyUntil.get(m) ?? 0) > d.t[i]) continue;
     if (d.out[i * OUT_W + OUT_AT.e1] > ML.maxChasePct) continue;
@@ -416,10 +417,13 @@ async function train() {
     // What each target had to work with, reported if none of them yields a model.
     const unusable = (rows: Int32Array) => (rows.length ? Math.round((100 * rows.reduce((a, i) => a + (d.out[i * OUT_W + OUT_AT.gap] ? 1 : 0), 0)) / rows.length) : 0);
     const why: string[] = [`learn ${trainAll.length} (${unusable(trainAll)}% with price holes), tune ${tuneAll.length} (${unusable(tuneAll)}% with holes)`];
+    // The win model learns, and every strategy is tuned and tested, only on coins the bot can trade:
+    // launched on pump.fun, so their liquidity can't be pulled. (The crash model learns from all coins.)
     const withOutcomes = (rows: Int32Array, target: Target) => {
       const r: number[] = [];
       const o: Outcome[] = [];
       for (const i of rows) {
+        if (!d.locked[i]) continue;
         const oc = outcomeFor(d, i, target);
         if (!oc) continue;
         r.push(i);
@@ -522,7 +526,8 @@ async function train() {
 
     // Only snapshots a bot could have bought (enough liquidity, no danger flags, the buy within the
     // slippage limit), so a coin's numbers describe trades the bot would actually make.
-    const canTrade = (i: number) => d.liq[i] >= ML.tradeMinLiquidity && !d.danger[i] && !(d.out[i * OUT_W + OUT_AT.e1] > ML.maxChasePct);
+    const canTrade = (i: number) =>
+      d.liq[i] >= ML.tradeMinLiquidity && !d.danger[i] && d.locked[i] === 1 && !(d.out[i * OUT_W + OUT_AT.e1] > ML.maxChasePct);
     const calibAll = [...tuneRows, ...testRows];
     const calibAllOuts = [...tuneOuts, ...testOuts];
     const calibKeep = calibAll.map((i, k) => (canTrade(i) ? k : -1)).filter((k) => k >= 0);
@@ -682,8 +687,8 @@ setSnapshotJudge((obs: Obs, freshAt: number) => {
     risk = c.crash ? predict(c.crash, x) : null;
     const r = rate(p, risk);
     rank = (r.ev ?? 0) * 100 + r.win;
-    // The rule the test traded on: the bar, the crash cap, enough liquidity, no danger flags.
-    const picked = p >= c.threshold && r.safeEnough && (obs.liq ?? 0) >= ML.tradeMinLiquidity && !hasDanger(obs);
+    // The rule the test traded on: the bar, the crash cap, enough liquidity, no danger flags, a pool that can't be pulled.
+    const picked = p >= c.threshold && r.safeEnough && (obs.liq ?? 0) >= ML.tradeMinLiquidity && !hasDanger(obs) && lockedPool(obs.mint);
     if (trusted(c.info)) {
       recorded = picked ? ML.targets.findIndex((t) => t.tp === c.info.target.tp && t.sl === c.info.target.sl) : -1;
       aiPick = picked && following();
@@ -943,7 +948,7 @@ export async function startModel() {
   try {
     const saved = await kvGet<SavedModel>(ML.modelKey);
     if (
-      (saved?.v === 4 || saved?.v === 5 || saved?.v === MODEL_V) &&
+      (saved?.v === 4 || saved?.v === 5 || saved?.v === 6 || saved?.v === MODEL_V) &&
       saved.cost === ML.costPerSide &&
       saved.schema === ML.schema &&
       JSON.stringify(saved.featureLabels) === JSON.stringify(FEATURE_LABELS) &&

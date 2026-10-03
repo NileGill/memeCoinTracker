@@ -303,5 +303,13 @@ export function featurize(o: Obs, out: Float32Array, offset = 0) {
   }
 }
 
+/**
+ * Launched on pump.fun (its address ends in "pump"): its pool's liquidity is locked for good when it
+ * graduates (LP burned), so the creator can't pull it. Checked on live coins on 2026-10-03: these show
+ * their LP 100% locked, while coins launched elsewhere were mixed, and the fresh ones the AI kept
+ * picking were mostly emptied within hours. The only coins the bot trades (and the AI is tested on).
+ */
+export const lockedPool = (mint: string) => mint.endsWith('pump');
+
 /** Danger flags (mint or freeze authority still active): never traded. */
 export const hasDanger = (o: Obs) => bit(o.flags, FLAGS, 'freeze') === 1 || bit(o.flags, FLAGS, 'mint') === 1;
