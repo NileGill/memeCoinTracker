@@ -18,6 +18,7 @@ import { connectedUsers, sendToUser } from '../lib/bus';
 import { ML } from '../ml/config';
 import { modelForBot, modelLoaded, notFollowingReason, snapshotSignalsSince, type SnapshotSignal } from '../ml/model';
 import { jupPrices } from '../sources/jupiter';
+import { lpSafety } from '../sources/rugcheck';
 import { feedsOk, PULLED_AFTER_MS, PULLED_SHARE } from '../ml/recorder';
 
 /*
@@ -38,6 +39,8 @@ import { feedsOk, PULLED_AFTER_MS, PULLED_SHARE } from '../ml/recorder';
  *  - It trades exactly the way the AI was tested: it buys only at the AI's 10-minute snapshots,
  *    measures the target and stop from the price the coin was picked at, and cancels a buy whose
  *    price ran up past the slippage limit before it landed.
+ *  - It never buys a coin whose pool liquidity its creator can pull (RugCheck: LP unlocked), the
+ *    rug behind most of its early losses, or one RugCheck couldn't vouch for.
  *  - Every swap pays a 1% pool/router fee and a network fee; a coin whose price feed dies, or
  *    whose pool is emptied (liquidity pulled: the price freezes but nothing can be sold), counts
  *    as a total loss.
@@ -462,8 +465,9 @@ function candidates(now: number, fresh: SnapshotSignal[]) {
   return { model, score };
 }
 
-/** The last snapshot the bot has looked at. */
+/** The last snapshot the bot has looked at, and snapshots waiting on a RugCheck answer (looked at again next tick). */
 let seenSignal = 0;
+const retrySignals = new Map<number, SnapshotSignal>();
 
 /**
  * Per account, over the last hour: coins its strategy wanted, those its own settings ruled out
@@ -472,7 +476,7 @@ let seenSignal = 0;
  * Memory only.
  */
 const wanted = new Map<string, Map<string, number>>();
-type SkipWhy = 'liquidity' | 'size' | 'chase';
+type SkipWhy = 'liquidity' | 'size' | 'chase' | 'pullable' | 'unchecked';
 const skipped = new Map<string, Map<string, { at: number; why: SkipWhy }>>();
 const HOUR = 3_600_000;
 
@@ -501,7 +505,8 @@ function tick() {
   const model = modelForBot();
   const fresh = snapshotSignalsSince(seenSignal);
   if (fresh.length) seenSignal = fresh[fresh.length - 1].seq;
-  const lists = candidates(now, fresh);
+  const lists = candidates(now, [...retrySignals.values(), ...fresh]);
+  retrySignals.clear();
   forgetOld(now);
   for (const a of accounts.values()) {
     manage(a, now, sol);
@@ -521,6 +526,16 @@ function tick() {
       if (a.positions.some((p) => p.mint === v.mint) || (a.cooldown[v.mint] ?? 0) > now) continue;
       if (c.live.liquidity! < a.settings.minLiquidity) {
         noteSkipped(a.userId, v.mint, 'liquidity', now);
+        continue;
+      }
+      // Never a coin whose creator can pull the pool's liquidity (the price freezes and nothing can be sold).
+      const lp = lpSafety(v.mint);
+      if (lp === 'checking') {
+        retrySignals.set(c.signal.seq, c.signal); // the answer usually arrives within a tick or two
+        continue;
+      }
+      if (lp !== 'safe') {
+        noteSkipped(a.userId, v.mint, lp === 'pullable' ? 'pullable' : 'unchecked', now);
         continue;
       }
       const size = tradeSize(a, c.live.liquidity!, sol, now);
@@ -589,7 +604,9 @@ function skipNote(a: Account, strategy: PaperStrategy): string {
   const thin = sk.filter((x) => x.why === 'liquidity').length;
   const small = sk.filter((x) => x.why === 'size').length;
   const ran = sk.filter((x) => x.why === 'chase').length;
-  if (!thin && !small && !ran) return '';
+  const pullable = sk.filter((x) => x.why === 'pullable').length;
+  const unchecked = sk.filter((x) => x.why === 'unchecked').length;
+  if (!thin && !small && !ran && !pullable && !unchecked) return '';
   const coins = (n: number) => `${n} ${n === 1 ? 'coin' : 'coins'}`;
   const found = strategy === 'model' ? `the AI picked ${coins(w)}` : `${coins(w)} scored ${a.settings.scoreMin}+`;
   const parts: string[] = [];
@@ -597,7 +614,10 @@ function skipNote(a: Account, strategy: PaperStrategy): string {
   const minText = min >= 1e6 ? `$${Math.round(min / 1e5) / 10}M` : `$${Math.round(min / 1000)}K`;
   if (thin) parts.push(`${thin} had less liquidity than your ${minText} minimum`);
   if (small) parts.push(`${small} would have been a trade under 0.01 SOL (balance too low)`);
-  const skips = parts.length ? `; ${parts.join(' and ')}, so the bot skipped ${thin + small === 1 ? 'it' : 'them'}` : '';
+  if (pullable) parts.push(`${pullable} had pool liquidity ${pullable === 1 ? 'its creator' : 'their creators'} can pull at any time (RugCheck)`);
+  if (unchecked) parts.push(`${unchecked} couldn't be checked with RugCheck`);
+  const n = thin + small + pullable + unchecked;
+  const skips = parts.length ? `; ${parts.join(' and ')}, so the bot skipped ${n === 1 ? 'it' : 'them'}` : '';
   const chased = ran
     ? ` ${ran === 1 ? '1 buy was' : `${ran} buys were`} cancelled because the price ran ${ML.maxChasePct}%+ above the pick before ${ran === 1 ? 'it' : 'they'} could land.`
     : '';
