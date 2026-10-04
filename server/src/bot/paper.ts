@@ -19,7 +19,6 @@ import { ML } from '../ml/config';
 import { modelForBot, modelLoaded, notFollowingReason, snapshotSignalsSince, type SnapshotSignal } from '../ml/model';
 import { jupPrices } from '../sources/jupiter';
 import { lpSafety } from '../sources/rugcheck';
-import { lockedPool } from '../ml/features';
 import { feedsOk, PULLED_AFTER_MS, PULLED_SHARE } from '../ml/recorder';
 
 /*
@@ -41,8 +40,8 @@ import { feedsOk, PULLED_AFTER_MS, PULLED_SHARE } from '../ml/recorder';
  *    measures the target and stop from the price the coin was picked at, and cancels a buy whose
  *    price ran up past the slippage limit before it landed.
  *  - It only buys coins launched on pump.fun, whose pool liquidity is locked for good when they
- *    graduate, and double-checks with RugCheck: creators pulling the liquidity was the rug behind
- *    most of its early losses.
+ *    graduate (double-checked with RugCheck), that are at least an hour old and traded by real
+ *    wallets: pulled liquidity, then launch-pump-dump factories, were behind most of its losses.
  *  - Every swap pays a 1% pool/router fee and a network fee; a coin whose price feed dies, or
  *    whose pool is emptied (liquidity pulled: the price freezes but nothing can be sold), counts
  *    as a total loss.
@@ -449,7 +448,7 @@ function candidates(now: number, fresh: SnapshotSignal[]) {
   const score: Candidate[] = [];
   for (const s of fresh) {
     if (now - s.at > 30_000) continue; // too late to act on it the way the test did
-    if (!lockedPool(s.mint)) continue; // its liquidity could be pulled: never traded (or tested)
+    if (!s.tradeable) continue; // not a coin the bot trades (or the AI is tested on): see tradeableCoin
     const info = entryInfo(s.mint);
     if (!info || info.hidden) continue;
     const v = info.view;

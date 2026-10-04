@@ -307,9 +307,18 @@ export function featurize(o: Obs, out: Float32Array, offset = 0) {
  * Launched on pump.fun (its address ends in "pump"): its pool's liquidity is locked for good when it
  * graduates (LP burned), so the creator can't pull it. Checked on live coins on 2026-10-03: these show
  * their LP 100% locked, while coins launched elsewhere were mixed, and the fresh ones the AI kept
- * picking were mostly emptied within hours. The only coins the bot trades (and the AI is tested on).
+ * picking were mostly emptied within hours.
  */
 export const lockedPool = (mint: string) => mint.endsWith('pump');
+
+/**
+ * The only coins the bot trades, and so the only ones the AI is tuned and tested on: launched on
+ * pump.fun (liquidity can't be pulled), at least an hour old and traded by real wallets (Jupiter's
+ * organic score), which rules out the launch-pump-dump factories (see ML.tradeMinAgeMin).
+ */
+export function tradeableCoin(o: Pick<Obs, 'mint' | 'age' | 'org'>, minAgeMin: number, minOrganic: number): boolean {
+  return lockedPool(o.mint) && o.age != null && o.age >= minAgeMin && o.org != null && o.org >= minOrganic;
+}
 
 /** Danger flags (mint or freeze authority still active): never traded. */
 export const hasDanger = (o: Obs) => bit(o.flags, FLAGS, 'freeze') === 1 || bit(o.flags, FLAGS, 'mint') === 1;

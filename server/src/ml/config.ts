@@ -39,6 +39,14 @@ export const ML = {
   minLiquidity: 5_000,
   /** The bot (and the backtest that judges it) never buys below this or with danger flags. */
   tradeMinLiquidity: 10_000,
+  /**
+   * ...nor a coin younger than this (minutes) or with a Jupiter organic score under this (0-100: the
+   * share of its trading that comes from real wallets rather than bots). On 2026-10-03/04 a factory of
+   * copycat coins (NVIDIA, SpaceX, Grok...) launched, self-graduated in the same second, pumped them
+   * with bot trades and dumped them 80-100% within half an hour; every one scored 0.
+   */
+  tradeMinAgeMin: fast ? 10 : 60,
+  tradeMinOrganic: 20,
 
   /** Profit levels (%) and loss levels (%) whose first-hit time is recorded for every snapshot. */
   tpLevels: [10, 20, 30, 50, 100].map((v) => v * scale),

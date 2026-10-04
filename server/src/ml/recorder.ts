@@ -2,7 +2,7 @@ import { gunzipSync, gzipSync } from 'node:zlib';
 import { db } from '../auth/db';
 import { allEntries, entryInfo, getSolPrice, marketCounts, registerHold } from '../engine/market';
 import { ML } from './config';
-import { decodeObs, encodeObs, featurize, hasDanger, lockedPool, makeObs, NUM_FEATURES, OBS_FIELDS, type Obs, type ObsContext, type TapeStats } from './features';
+import { decodeObs, encodeObs, featurize, hasDanger, makeObs, tradeableCoin, NUM_FEATURES, OBS_FIELDS, type Obs, type ObsContext, type TapeStats } from './features';
 
 /*
  * The model's training data, collected by MemeRadar itself. No free source offers the full
@@ -237,6 +237,9 @@ registerHold((mint) => openPerMint.has(mint), false);
 
 const r2 = (v: number) => Math.round(v * 100) / 100;
 
+/** A snapshot of a coin the bot would trade (see tradeableCoin). */
+export const isTradeable = (o: Obs) => tradeableCoin(o, ML.tradeMinAgeMin, ML.tradeMinOrganic);
+
 function sample(now: number) {
   const ctx = obsContext();
   for (const info of allEntries()) {
@@ -422,8 +425,8 @@ export interface Dataset {
   out: Float32Array;
   liq: Float32Array;
   danger: Uint8Array;
-  /** 1 = launched on pump.fun, so its liquidity can't be pulled: the only coins the bot trades. */
-  locked: Uint8Array;
+  /** 1 = a coin the bot trades (see tradeableCoin): pump.fun, an hour old, real trading. */
+  tradeable: Uint8Array;
   score: Float32Array;
 }
 
@@ -436,7 +439,7 @@ const data: Dataset = {
   out: new Float32Array(CAP * OUT_W),
   liq: new Float32Array(CAP),
   danger: new Uint8Array(CAP),
-  locked: new Uint8Array(CAP),
+  tradeable: new Uint8Array(CAP),
   score: new Float32Array(CAP),
 };
 const mintIds = new Map<string, number>();
@@ -467,7 +470,7 @@ function writeRow(obs: Obs, out: Outcome) {
     data.out.copyWithin(0, drop * OUT_W, data.n * OUT_W);
     data.liq.copyWithin(0, drop, data.n);
     data.danger.copyWithin(0, drop, data.n);
-    data.locked.copyWithin(0, drop, data.n);
+    data.tradeable.copyWithin(0, drop, data.n);
     data.score.copyWithin(0, drop, data.n);
     data.n = keep;
     recomputeRange();
@@ -496,7 +499,7 @@ function writeRow(obs: Obs, out: Outcome) {
   data.out[o + OUT_AT.gap] = out.gap;
   data.liq[i] = obs.liq ?? NaN;
   data.danger[i] = hasDanger(obs) ? 1 : 0;
-  data.locked[i] = lockedPool(obs.mint) ? 1 : 0;
+  data.tradeable[i] = isTradeable(obs) ? 1 : 0;
   data.score[i] = obs.score ?? NaN;
 }
 
