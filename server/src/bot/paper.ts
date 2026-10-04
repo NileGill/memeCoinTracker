@@ -189,18 +189,15 @@ function touchAccount(a: Account) {
 
 const scoreTarget = (): AiTarget => ({ ...ML.scoreTarget, holdMin: Math.round(ML.horizonMs / 60_000) });
 
-/** The score strategy made money in the latest test (or hasn't been tested yet). */
-function scoreWorks(model: ReturnType<typeof modelForBot>): boolean {
-  if (!model) return true;
-  const r = model.score;
-  return r != null && r.trades >= ML.proven.minTrades && r.avgReturn >= ML.proven.minAvgReturn;
-}
-
+/**
+ * Paper bots trade the AI's picks whether or not it has passed its test: it's fake money, and the point
+ * is to see how it really does. (Real money would need it proven: see the readiness checklist.) The
+ * MemeRadar score is only used before there is any AI, if the account allows it.
+ */
 function strategyFor(a: Account, model: ReturnType<typeof modelForBot>): PaperStrategy | null {
   if (!modelLoaded()) return null; // starting up: don't mistake "not loaded yet" for "no model"
-  if (model?.proven) return 'model';
-  // Before the AI is followed, the score is the fallback, but not once it has tested as a loser.
-  return a.settings.mode === 'auto' && scoreWorks(model) ? 'score' : null;
+  if (model) return 'model';
+  return a.settings.mode === 'auto' ? 'score' : null;
 }
 
 /** The most SOL this account would put into this coin right now (0 = don't buy). */
@@ -632,19 +629,14 @@ function activity(a: Account): string {
   const strategy = strategyFor(a, model);
   const holding = `Holding ${a.positions.length} of ${a.settings.maxOpen}.`;
   if (!modelLoaded()) return `Starting up… ${holding}`;
-  const why = notFollowingReason() ?? 'the AI model is not being followed';
-  if (!strategy && a.settings.mode !== 'auto') return `Not buying: ${why} (you chose "AI only"). ${holding}`;
-  if (!strategy) {
-    const r = model?.score;
-    const score =
-      r && r.trades >= ML.proven.minTrades
-        ? `buying on the MemeRadar score averaged ${r.avgReturn > 0 ? '+' : ''}${r.avgReturn}% per trade after fees in the latest test (it needs +${ML.proven.minAvgReturn}%)`
-        : 'the MemeRadar score made too few trades in the latest test to judge';
-    return `Not buying: ${why}, and ${score}. ${holding}`;
-  }
+  const why = notFollowingReason();
+  if (!strategy) return `Not buying: the AI model is still collecting data (you chose "AI only"). ${holding}`;
   if (strategy === 'score')
-    return `Trading on the MemeRadar score (${a.settings.scoreMin}+)${model?.scoreRiskMax != null ? ', skipping coins the crash model flags,' : ''} because ${why}. ${holding}${skipNote(a, strategy)}`;
-  return `Trading the AI model's picks at its 10-minute checks (likely winners it doesn't expect to crash). ${holding}${skipNote(a, strategy)}`;
+    return `Trading on the MemeRadar score (${a.settings.scoreMin}+) while the AI model is still collecting data. ${holding}${skipNote(a, strategy)}`;
+  const proof = why
+    ? ` Fake money only: ${why}, so real trading would stay locked; this shows how its picks really do.`
+    : ' It passed its latest test.';
+  return `Trading the AI model's picks at its 10-minute checks.${proof} ${holding}${skipNote(a, strategy)}`;
 }
 
 export function accountView(a: Account, tradeLimit = 100): PaperAccountView {

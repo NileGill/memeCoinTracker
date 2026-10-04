@@ -150,26 +150,26 @@ function LiveHours({ hours }: { hours: MlLiveHour[] }) {
   return (
     <div className="col" style={{ gap: 4, marginTop: 4 }}>
       <div className="dim" style={{ fontSize: 12 }}>
-        AI picks per hour, last 24 hours: <span style={{ color: 'var(--accent-2)' }}>■</span> followed by the bot ·{' '}
-        <span style={{ color: 'var(--dim)' }}>■</span> not followed (no AI passed its test) · <span style={{ color: 'var(--red)' }}>■</span> paused by
-        the live record. Hover a bar for details; the last hour is still filling in.
+        AI picks per hour, last 24 hours: <span style={{ color: 'var(--accent-2)' }}>■</span> AI proven ·{' '}
+        <span style={{ color: 'var(--amber)' }}>■</span> AI not proven (paper bots still trade its picks; real money wouldn't) ·{' '}
+        <span style={{ color: 'var(--red)' }}>■</span> paused by the live record. Hover a bar for details; the last hour is still filling in.
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(24, minmax(0, 1fr))', gap: 2, height: H, alignItems: 'end' }}>
         {hours.map((h) => {
           const off = h.tracked && h.snapshots > 0 && h.followed < h.snapshots / 2;
-          const color = off ? 'var(--dim)' : h.paused ? 'var(--red)' : 'var(--accent-2)';
+          const color = h.paused ? 'var(--red)' : off ? 'var(--amber)' : 'var(--accent-2)';
           const title =
             `${label(h.at)}: ` +
             (h.snapshots === 0
               ? 'no data yet'
               : !h.tracked
                 ? 'before the AI was tracked hour by hour'
-                : off
-                ? `the bot wasn't following the AI (no AI had passed its test)`
-                : `${h.picks} ${h.picks === 1 ? 'pick' : 'picks'} (${h.deep} with $20K+ liquidity, ${h.ran} ran 10%+ before a buy could land)${h.paused ? '; paused by the live record' : ''}`) +
+                : `${h.picks} ${h.picks === 1 ? 'pick' : 'picks'} (${h.deep} with $20K+ liquidity, ${h.ran} ran 10%+ before a buy could land)` +
+                  (off ? '; the AI had not passed its test' : '') +
+                  (h.paused ? '; paused by the live record' : '')) +
             (h.complete ? '' : ' (still filling in)');
-          const height = h.snapshots === 0 || !h.tracked ? 2 : off ? H : Math.max(3, (h.picks / max) * H);
-          return <div key={h.at} title={title} style={{ height, background: color, opacity: off ? 0.35 : h.complete ? 1 : 0.55, borderRadius: 2 }} />;
+          const height = h.snapshots === 0 || !h.tracked ? 2 : Math.max(3, (h.picks / max) * H);
+          return <div key={h.at} title={title} style={{ height, background: color, opacity: h.complete ? 1 : 0.55, borderRadius: 2 }} />;
         })}
       </div>
       <div className="row dim" style={{ justifyContent: 'space-between', fontSize: 11 }}>
@@ -246,7 +246,7 @@ function Picks({ ml }: { ml: MlStatus | null }) {
   const rows = useMemo(
     () =>
       tokenList
-        .filter((t) => t.ai && (proven ? t.ai.pick : (t.liquidity ?? 0) >= 10_000))
+        .filter((t) => t.ai?.pick)
         .sort((a, b) => (b.ai!.ev ?? -99) - (a.ai!.ev ?? -99) || b.ai!.win - a.ai!.win)
         .slice(0, 10),
     [tokenList, proven],
@@ -256,15 +256,18 @@ function Picks({ ml }: { ml: MlStatus | null }) {
     <section className="panel">
       <div className="panel-head">
         <h2>
-          <Icon name="target" size={15} /> {proven ? "The AI's latest picks" : 'Highest rated right now'}
+          <Icon name="target" size={15} /> The AI's latest picks
         </h2>
-        <span className="sub">{proven ? 'picked at its 10-minute checks in the last 10 minutes; the bot buys at the moment of the pick' : 'not followed by the bot right now: for information only'}</span>
+        <span className="sub">
+          picked at its 10-minute checks in the last 10 minutes; paper bots buy at the moment of the pick
+          {proven ? '' : ' (it hasn\'t passed its test, so real money wouldn\'t)'}
+        </span>
       </div>
       <div className="feed">
         {rows.map((t) => (
           <PickRow key={t.mint} t={t} />
         ))}
-        {!rows.length && <Empty>{proven ? 'Nothing picked in the last 10 minutes. The bot waits for strong setups.' : 'No rated coins yet.'}</Empty>}
+        {!rows.length && <Empty>Nothing picked in the last 10 minutes. The bot waits for strong setups.</Empty>}
       </div>
     </section>
   );
@@ -374,7 +377,7 @@ function SettingsFields({ s, onChange }: { s: PaperSettings; onChange: (s: Paper
         Strategy
         <span className="seg">
           <button type="button" className={s.mode === 'auto' ? 'on' : ''} onClick={() => onChange({ ...s, mode: 'auto' })}>
-            Score now, AI when proven
+            AI, or score before there's an AI
           </button>
           <button type="button" className={s.mode === 'model' ? 'on' : ''} onClick={() => onChange({ ...s, mode: 'model' })}>
             AI only
@@ -382,8 +385,8 @@ function SettingsFields({ s, onChange }: { s: PaperSettings; onChange: (s: Paper
         </span>
         <span className="dim" style={{ fontWeight: 400 }}>
           {s.mode === 'auto'
-            ? 'Trades the AI while it has proven itself; otherwise falls back to the MemeRadar score, but only while the score is making money in the latest test.'
-            : 'Trades only while the AI model has passed its test and its live picks are holding up.'}
+            ? "Trades the AI's picks (fake money, so even before it passes its test), or the MemeRadar score while there's no AI yet."
+            : "Trades only the AI's picks, and nothing while there's no AI yet."}
         </span>
       </label>
     </div>
@@ -718,7 +721,7 @@ function BotDashboard({ a }: { a: PaperAccountView }) {
           ) : (
             <div className="dim">
               {a.settings.sizePct}% of the balance per trade, at most {fmtSol(a.settings.maxTradeSol)} and {a.settings.maxPoolPct}% of a coin's pool · up
-              to {a.settings.maxOpen} at once · coins with {fmtUsd(a.settings.minLiquidity)}+ liquidity · {a.settings.mode === 'auto' ? `the AI when proven, otherwise score ${a.settings.scoreMin}+ if that's making money` : 'AI picks only'}
+              to {a.settings.maxOpen} at once · coins with {fmtUsd(a.settings.minLiquidity)}+ liquidity · {a.settings.mode === 'auto' ? `the AI's picks (score ${a.settings.scoreMin}+ before there's an AI)` : 'AI picks only'}
             </div>
           )}
           {msg && <div className="notice red">{msg}</div>}

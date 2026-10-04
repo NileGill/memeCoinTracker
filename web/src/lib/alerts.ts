@@ -96,8 +96,9 @@ export function checkMarket(tokens: TokenView[], serverStartedAt: number) {
       }
     }
 
-    // The AI picked this coin at its latest check (the bot buys at that moment).
-    if (!t.ai?.pick) aiArmed.set(t.mint, true);
+    // The AI picked this coin at its latest check (the bot buys at that moment). Alerts are for people
+    // trading for real, so only while the AI has passed its test.
+    if (!t.ai?.pick || !useStore.getState().ml?.following) aiArmed.set(t.mint, true);
     else if (settings.alertAi && aiArmed.get(t.mint) !== false && !onCooldown(`ai:${t.mint}`, 60 * 60_000)) {
       aiArmed.set(t.mint, false);
       const target = useStore.getState().ml?.model?.target;

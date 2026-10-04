@@ -193,14 +193,16 @@ export interface Outcome {
    */
   pulled?: number;
   /**
-   * What the AI decided at this snapshot, while it was proven and up to date: the index in ML.targets
-   * it picked the coin for, or -1 if it passed (null: no such AI at the time). Its live record is
-   * built from these. Missing in snapshots recorded before this was added.
+   * What the AI decided at this snapshot: the index in ML.targets it picked the coin for, or -1 if it
+   * passed (null: no AI yet). Its live record is built from these. Missing in snapshots recorded
+   * before 2026-10-02; until 2026-10-04 only recorded while the AI was proven and up to date.
    */
   pick?: number | null;
+  /** 1 = that AI had passed its test and was up to date (what real money would follow), 0 = not. Missing before 2026-10-04. */
+  trusted?: number | null;
 }
 
-const OUT_FIELDS = ['tp', 'tpn', 'e1', 'sl', 'slr', 'rq', 'hi', 'lo', 'last', 'gone', 'gap', 'pick', 'pulled'] as const;
+const OUT_FIELDS = ['tp', 'tpn', 'e1', 'sl', 'slr', 'rq', 'hi', 'lo', 'last', 'gone', 'gap', 'pick', 'pulled', 'trusted'] as const;
 
 interface Open {
   obs: Obs;
@@ -221,9 +223,9 @@ const open: Open[] = [];
 
 /**
  * Called for every new snapshot (by the model, which decides on the spot whether the bot buys it).
- * Returns what to record as the snapshot's `pick`.
+ * Returns what to record as the snapshot's `pick` and `trusted` (null: no AI yet).
  */
-type Judge = (obs: Obs, freshAt: number) => number | null;
+type Judge = (obs: Obs, freshAt: number) => { pick: number; trusted: boolean } | null;
 let judge: Judge | null = null;
 export function setSnapshotJudge(fn: Judge) {
   judge = fn;
@@ -252,9 +254,9 @@ function sample(now: number) {
     const obs = makeObs(v, ctx);
     if (!obs) continue;
     lastSampled.set(v.mint, now);
-    let pick: number | null = null;
+    let decision: ReturnType<Judge> = null;
     try {
-      pick = judge ? judge(obs, info.freshAt) : null;
+      decision = judge ? judge(obs, info.freshAt) : null;
     } catch (e) {
       console.error('[ml] judging a snapshot failed:', e);
     }
@@ -279,7 +281,8 @@ function sample(now: number) {
         last: 0,
         gone: 0,
         gap: 0,
-        pick,
+        pick: decision ? decision.pick : null,
+        trusted: decision ? (decision.trusted ? 1 : 0) : null,
         pulled: 0,
       },
     });
@@ -394,7 +397,7 @@ const NT = ML.tpLevels.length;
 const NS = ML.slLevels.length;
 const NQ = CHECKPOINTS.length;
 const BASE_W = NT + 2 * NS + NQ;
-export const OUT_W = BASE_W + 5 + NT + 3;
+export const OUT_W = BASE_W + 5 + NT + 4;
 export const OUT_AT = {
   tp: 0,
   sl: NT,
@@ -411,6 +414,8 @@ export const OUT_AT = {
   pick: BASE_W + 5 + NT + 1,
   /** 1 = liquidity pulled, 0 = not, NaN = recorded before pulls were tracked. */
   pulled: BASE_W + 5 + NT + 2,
+  /** 1 = the AI deciding was proven and up to date, 0 = not, NaN = not recorded (see Outcome.trusted). */
+  trusted: BASE_W + 5 + NT + 3,
 };
 
 const F = NUM_FEATURES;
@@ -488,6 +493,7 @@ function writeRow(obs: Obs, out: Outcome) {
   for (let k = 0; k < NT; k++) data.out[o + OUT_AT.tpn + k] = out.tpn?.[k] ?? NaN;
   data.out[o + OUT_AT.e1] = out.e1 ?? NaN;
   data.out[o + OUT_AT.pick] = out.pick ?? NaN;
+  data.out[o + OUT_AT.trusted] = out.trusted ?? NaN;
   data.out[o + OUT_AT.pulled] = out.pulled ?? NaN;
   out.sl.forEach((v, k) => (data.out[o + OUT_AT.sl + k] = v));
   out.slr.forEach((v, k) => (data.out[o + OUT_AT.slr + k] = v ?? NaN));

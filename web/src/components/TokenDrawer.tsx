@@ -53,7 +53,10 @@ function AiPanel({ t, drivers }: { t: TokenView; drivers: AiDriver[] | null | un
           )}
           .{' '}
           {pick ? (
-            <b className="up">The AI picked this at its latest 10-minute check, so the bot buys it (if it has room).</b>
+            <b className="up">
+              The AI picked this at its latest 10-minute check, so paper bots buy it (if they have room)
+              {following ? '.' : ", although it hasn't passed its test, so real money wouldn't."}
+            </b>
           ) : following ? (
             <span className="muted">Not picked at its latest 10-minute check (the only moments the bot buys).</span>
           ) : (

@@ -652,7 +652,10 @@ export interface SnapshotSignal {
   /** The price the snapshot was taken at, and when that price reading arrived. */
   price: number;
   freshAt: number;
-  /** The AI picks it (and the bot is following the AI). */
+  /**
+   * The AI picks it. Paper bots buy its picks whether or not it has passed its test (it's fake money:
+   * the point is to see how it does); real money would need it proven (`modelForBot().proven`).
+   */
   pick: boolean;
   /** For ordering several picks at once: the AI's test results for coins rated like this. */
   rank: number;
@@ -681,7 +684,7 @@ setSnapshotJudge((obs: Obs, freshAt: number) => {
   let aiPick = false;
   let rank = 0;
   let risk: number | null = null;
-  let recorded: number | null = null;
+  let recorded: { pick: number; trusted: boolean } | null = null;
   if (c) {
     const x = new Float32Array(F);
     featurize(obs, x);
@@ -690,11 +693,11 @@ setSnapshotJudge((obs: Obs, freshAt: number) => {
     const r = rate(p, risk);
     rank = (r.ev ?? 0) * 100 + r.win;
     // The rule the test traded on: the bar, the crash cap, enough liquidity, no danger flags, a coin the bot trades.
-    const picked = p >= c.threshold && r.safeEnough && (obs.liq ?? 0) >= ML.tradeMinLiquidity && !hasDanger(obs) && isTradeable(obs);
-    if (trusted(c.info)) {
-      recorded = picked ? ML.targets.findIndex((t) => t.tp === c.info.target.tp && t.sl === c.info.target.sl) : -1;
-      aiPick = picked && following();
-    }
+    aiPick = p >= c.threshold && r.safeEnough && (obs.liq ?? 0) >= ML.tradeMinLiquidity && !hasDanger(obs) && isTradeable(obs);
+    recorded = {
+      pick: aiPick ? ML.targets.findIndex((t) => t.tp === c.info.target.tp && t.sl === c.info.target.sl) : -1,
+      trusted: trusted(c.info),
+    };
   }
   const scoreRiskMax = c?.crash ? c.scoreRiskMax : null;
   signals.push({
@@ -755,8 +758,9 @@ export function explain(v: TokenView): AiDriver[] | null {
 
 /**
  * The AI's picks since this was added, each followed to the end exactly like a test trade (same
- * outcome rules, one trade per coin at a time, slippage limit). A pick's result is known an hour
- * after it's made, so this trails by an hour.
+ * outcome rules, one trade per coin at a time, slippage limit), whether or not it had passed its test
+ * at the time (paper bots trade them either way; before 2026-10-04 only proven picks were recorded).
+ * A pick's result is known an hour after it's made, so this trails by an hour.
  */
 let live: MlLiveRecord | null = null;
 
@@ -842,8 +846,10 @@ function hourly(d: Dataset, now: number, trades: { t: number; ret: number }[], l
     const h = hours[k];
     const o = i * OUT_W;
     const pick = d.out[o + OUT_AT.pick];
+    const trust = d.out[o + OUT_AT.trusted];
     h.snapshots++;
-    if (!Number.isNaN(pick)) h.followed++;
+    // Older snapshots recorded a decision only while the AI was proven.
+    if (Number.isNaN(trust) ? !Number.isNaN(pick) : trust === 1) h.followed++;
     if (pick >= 0) {
       h.picks++;
       if (d.liq[i] >= 20_000) h.deep++;
