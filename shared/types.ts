@@ -152,6 +152,12 @@ export interface MlModelInfo {
   /** Plain-English reasons when not proven. */
   problems: string[];
   topFeatures: { label: string; importance: number }[];
+  /**
+   * Every exit the trainer tried (target, stop, hold), with the rule the tuning period chose for it and
+   * how that rule did in the test. For seeing what works; the choice never looks at these test results.
+   * Missing in models trained before 2026-10-08.
+   */
+  options?: { tp: number; sl: number; holdMin: number; tune: StrategyResult; test: StrategyResult; chosen: boolean }[];
 }
 
 export interface MlStatus {

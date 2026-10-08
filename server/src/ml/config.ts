@@ -61,6 +61,12 @@ export const ML = {
     { tp: 30, sl: 15 },
     { tp: 30, sl: 30 },
     { tp: 50, sl: 20 },
+    // Added 2026-10-08: small targets win more often (each is also tried with 15 and 30 minute holds).
+    // Only ever append: recorded picks refer to these by position.
+    { tp: 10, sl: 10 },
+    { tp: 10, sl: 20 },
+    { tp: 10, sl: 30 },
+    { tp: 20, sl: 30 },
   ].map((t) => ({ tp: t.tp * scale, sl: t.sl * scale })),
   /** Target for the plain-score strategy the bot uses before the AI is proven. */
   scoreTarget: { tp: 30 * scale, sl: 15 * scale },
@@ -68,7 +74,7 @@ export const ML = {
    * When two strategies make about the same money (within this many % per trade), prefer the one
    * that wins more often.
    */
-  preferWinRateWithin: 0.5,
+  preferWinRateWithin: 1,
 
   /**
    * Assumed cost per buy or sell: 1% pool + router fee, plus ~0.5% slippage for a trade of 0.25% of

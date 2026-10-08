@@ -195,6 +195,7 @@ function ModelResults({ m }: { m: MlModelInfo }) {
           <StrategyLine label={`MemeRadar score ${m.scoreFiltered.threshold}+ with the crash filter (same period)`} r={m.scoreFiltered} />
         )}
         {m.baseline && <StrategyLine label={`Plain MemeRadar score ${m.baseline.threshold}+ (same period)`} r={m.baseline} />}
+        {m.options && m.options.length > 1 && <ExitOptions options={m.options} />}
         {m.crash && (
           <div className="dim" style={{ fontSize: 12.5 }}>
             <b>Crash filter:</b> a second model rates each coin's chance of falling 50%+ (or vanishing) within the hour. In the test period{' '}
@@ -235,6 +236,65 @@ function ModelResults({ m }: { m: MlModelInfo }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Every exit the trainer tried: the rule the tuning period chose for each, and how that did in the test. */
+function ExitOptions({ options }: { options: NonNullable<MlModelInfo['options']> }) {
+  const rows = [...options].sort((a, b) => b.test.avgReturn - a.test.avgReturn);
+  const cell = { padding: '3px 8px', textAlign: 'right' as const, whiteSpace: 'nowrap' as const };
+  const res = (r: StrategyResult) =>
+    r.trades ? (
+      <>
+        <td style={cell}>{r.trades}</td>
+        <td style={cell}>{pct1(r.winRate)}</td>
+        <td style={cell} className={pctClass(r.avgReturn)}>
+          {fmtPct(r.avgReturn)}
+        </td>
+      </>
+    ) : (
+      <td style={cell} colSpan={3}>
+        no trades
+      </td>
+    );
+  return (
+    <details style={{ fontSize: 12.5 }}>
+      <summary className="dim" style={{ cursor: 'pointer' }}>
+        Every exit it tried ({options.length})
+      </summary>
+      <div className="dim" style={{ margin: '6px 0' }}>
+        Each target and stop was tuned on the earlier period, including how long to hold; the test columns show how that then did on the newest
+        data. The AI chooses from the tuning results only, so this is for seeing what works, not for choosing.
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', width: '100%' }} className="num">
+          <thead className="dim">
+            <tr>
+              <th style={{ ...cell, textAlign: 'left' }}>Target / stop</th>
+              <th style={cell}>Hold</th>
+              <th style={cell} colSpan={3}>
+                Tuning: trades · won · avg
+              </th>
+              <th style={cell} colSpan={3}>
+                Test: trades · won · avg
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((o) => (
+              <tr key={`${o.tp}/${o.sl}`} style={o.chosen ? { fontWeight: 650 } : undefined}>
+                <td style={{ ...cell, textAlign: 'left' }}>
+                  +{o.tp}% / −{o.sl}%{o.chosen ? ' (chosen)' : ''}
+                </td>
+                <td style={cell}>{o.holdMin} min</td>
+                {res(o.tune)}
+                {res(o.test)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </details>
   );
 }
 

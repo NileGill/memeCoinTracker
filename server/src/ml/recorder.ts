@@ -18,8 +18,8 @@ import { decodeObs, encodeObs, featurize, hasDanger, makeObs, tradeableCoin, NUM
 
 const TICK_MS = 5_000;
 const horizonSec = ML.horizonMs / 1000;
-/** Outcome checkpoints, as fractions of the horizon (15, 30 and 60 minutes). */
-const CHECKPOINTS = [0.25, 0.5, 1];
+/** Outcome checkpoints, as fractions of the horizon (15, 30 and 60 minutes). Also the hold times the trainer can choose. */
+export const CHECKPOINTS = [0.25, 0.5, 1];
 /** A coin whose price feed stopped for this long, while the feeds work for other coins, is treated as rugged. */
 const GONE_AFTER_MS = 10 * 60_000;
 const GONE_RETURN = -90;
@@ -708,14 +708,17 @@ export function dataQuality() {
 /**
  * A snapshot recorded before pulled liquidity was tracked, whose price was exactly the same at 30 and
  * 60 minutes: no one traded for half an hour, the mark of a pool whose liquidity was pulled (all ten
- * zero-liquidity exits found on 2026-10-03 looked like this). Counted as a pull.
+ * zero-liquidity exits found on 2026-10-03 looked like this). Counted as a pull. For a shorter hold
+ * (checkpoint index `hold`), the price must already have been frozen at that checkpoint.
  */
-export function frozenOld(d: Dataset, i: number): boolean {
+export function frozenOld(d: Dataset, i: number, hold = CHECKPOINTS.length - 1): boolean {
   const o = i * OUT_W;
   if (!Number.isNaN(d.out[o + OUT_AT.pulled]) || d.out[o + OUT_AT.gap] || d.out[o + OUT_AT.gone]) return false;
-  const half = d.out[o + OUT_AT.rq + 1];
-  const end = d.out[o + OUT_AT.rq + 2];
-  return Number.isFinite(half) && half === end;
+  for (let k = Math.min(hold, CHECKPOINTS.length - 2); k < CHECKPOINTS.length - 1; k++) {
+    const a = d.out[o + OUT_AT.rq + k];
+    if (!Number.isFinite(a) || a !== d.out[o + OUT_AT.rq + k + 1]) return false;
+  }
+  return true;
 }
 
 /** False while most price feeds are down (an outage, not a rug). */

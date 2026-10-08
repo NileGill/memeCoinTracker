@@ -5,7 +5,7 @@ import { kvGet, kvSet } from '../lib/cache';
 import { ML, type Target } from './config';
 import { FEATURES, featurize, hasDanger, makeObs, NUM_FEATURES, type Obs } from './features';
 import { auc, contributions, fitGbdt, importance, Pacer, predict, type GbdtModel } from './gbdt';
-import { borrowDataset, frozenOld, isTradeable, obsContext, OUT_AT, OUT_W, recorderStatus, setSnapshotJudge, type Dataset } from './recorder';
+import { borrowDataset, CHECKPOINTS, frozenOld, isTradeable, obsContext, OUT_AT, OUT_W, recorderStatus, setSnapshotJudge, type Dataset } from './recorder';
 
 /*
  * Training and using the model.
@@ -33,15 +33,24 @@ const FEATURE_LABELS = FEATURES.map((f) => f.label);
 /** The deepest recorded loss level (50%): hitting it counts as a crash. */
 const CRASH_LEVEL = ML.slLevels.length - 1;
 
+/** Hold times the trainer can choose: indexes into the recorder's checkpoints (15, 30 or 60 minutes). */
+const FULL = CHECKPOINTS.length - 1;
+const HOLDS = CHECKPOINTS.map((_, h) => h);
+const holdMinutes = (h: number) => (ML.horizonMs / 60_000) * CHECKPOINTS[h];
+/** A recorded pick: its target (index into ML.targets) and hold. Picks recorded before holds varied are full hours. */
+const encodePick = (target: number, hold: number) => target + 100 * (FULL - hold);
+const decodePick = (v: number) => ({ target: ML.targets[v % 100], hold: FULL - Math.floor(v / 100) });
+
 /**
  * Saved-model format. Older versions still load, then retrain at once: 4 was tested before the bot
  * traded exactly like the test, 5 before pulled liquidity counted as a total loss, 6 on coins whose
- * liquidity could be pulled, 7 on brand-new bot-traded coins (none of which the bot buys any more).
+ * liquidity could be pulled, 7 on brand-new bot-traded coins (none of which the bot buys any more),
+ * 8 with full-hour holds and fewer exits only.
  */
-const MODEL_V = 8;
+const MODEL_V = 9;
 
 interface SavedModel {
-  v: 4 | 5 | 6 | 7 | 8;
+  v: 4 | 5 | 6 | 7 | 8 | 9;
   schema: number;
   /** Cost per side the test charged; a model tested at a different cost is retrained. */
   cost: number;
@@ -51,6 +60,8 @@ interface SavedModel {
   info: MlModelInfo;
   /** Raw win-model probability the bot buys at. */
   threshold: number;
+  /** How long a trade is held (checkpoint index; missing in models before 2026-10-08: the full hour). */
+  hold?: number;
   /** Crash chance above which the AI bot skips a coin (null = no cap). */
   riskMax: number | null;
   /** The same cap for the score strategy used before the AI is proven (null = no cap). */
@@ -101,22 +112,26 @@ const netFrom = (exitPct: number, entryPct: number) =>
 const COLLAPSED_PCT = -90;
 
 /**
- * What a bot trade with this target would have done from snapshot `i` (null = unusable row).
- * The buy lands at the next reading after the snapshot, not at the snapshot price. Like the bot,
- * the target and stop are levels from the snapshot price (the price the coin was picked at).
+ * What a bot trade with this target, held at most `hold` (a checkpoint: 15, 30 or 60 minutes), would
+ * have done from snapshot `i` (null = unusable row). The buy lands at the next reading after the
+ * snapshot, not at the snapshot price. Like the bot, the target and stop are levels from the snapshot
+ * price (the price the coin was picked at). `y` (what the win model learns) is for the hold given.
  */
-function outcomeFor(d: Dataset, i: number, t: Target): Outcome | null {
+function outcomeFor(d: Dataset, i: number, t: Target, hold = FULL): Outcome | null {
   const o = i * OUT_W;
   if (d.out[o + OUT_AT.gap]) return null;
   const e1 = d.out[o + OUT_AT.e1];
   const entry = Number.isNaN(e1) ? 0 : e1;
   const ti = ML.tpLevels.indexOf(t.tp);
   const si = ML.slLevels.indexOf(t.sl);
-  const tpT = d.out[o + OUT_AT.tp + ti];
-  const slT = d.out[o + OUT_AT.sl + si];
+  const limit = horizonSec * CHECKPOINTS[hold];
+  // A level first reached after the hold ended doesn't count: the trade was already sold.
+  const within = (sec: number) => (sec >= 0 && sec <= limit ? sec : -1);
+  const tpT = within(d.out[o + OUT_AT.tp + ti]);
+  const slT = within(d.out[o + OUT_AT.sl + si]);
   // The coin collapsed before the buy landed: like the paper bot, buying into an emptied pool gets
   // ~nothing back. (Measuring from a price near zero once divided by zero and broke training.)
-  if (entry <= COLLAPSED_PCT) return { y: 0, ret: -100, exitSec: slT >= 0 ? slT : horizonSec };
+  if (entry <= COLLAPSED_PCT) return { y: 0, ret: -100, exitSec: slT >= 0 ? slT : limit };
   // The bot's target and stop are the same levels from the picked price, so the result is that
   // sale price against what the buy paid. It can't lose more than everything.
   const netReturn = (grossFromSnapshot: number) => Math.max(-100, netFrom(grossFromSnapshot, entry));
@@ -133,10 +148,10 @@ function outcomeFor(d: Dataset, i: number, t: Target): Outcome | null {
   // Liquidity pulled in a snapshot recorded before pulls were tracked: the price froze, so it never
   // reached the target or the stop, and at the time limit there was nothing to sell into. (Newer
   // snapshots record the pull as a -100% stop.)
-  if (frozenOld(d, i)) return { y: 0, ret: -100, exitSec: horizonSec };
-  const end = d.out[o + OUT_AT.rq + 2];
+  if (frozenOld(d, i, hold)) return { y: 0, ret: -100, exitSec: limit };
+  const end = d.out[o + OUT_AT.rq + hold];
   if (Number.isNaN(end)) return null;
-  return { y: 0, ret: netReturn(end), exitSec: horizonSec };
+  return { y: 0, ret: netReturn(end), exitSec: limit };
 }
 
 /** 1 if the coin fell 50%+ at some point in the hour, its price feed died or its liquidity was pulled; 0 if not; null if unusable. */
@@ -226,17 +241,20 @@ interface Rule {
   th: number;
   /** ...and the crash chance is at most this (null = no cap). */
   risk: number | null;
+  /** ...and hold at most this long (checkpoint index). */
+  hold: number;
   sim: Sim;
 }
 
 /**
  * Choose how picky to be on the tuning data: a bar for the signal (by default from "top 1%" to
- * "top half"), and optionally a crash-risk cap that skips the riskiest 10-70% of coins.
+ * "top half"), optionally a crash-risk cap that skips the riskiest 10-70% of coins, and how long to
+ * hold (15, 30 or 60 minutes). `outsByHold[h]` are the rows' outcomes when held for hold `h`.
  */
 function pickRule(
   d: Dataset,
   rows: Int32Array,
-  outs: (Outcome | null)[],
+  outsByHold: (Outcome | null)[][],
   signal: ArrayLike<number>,
   risk: ArrayLike<number> | null,
   minTrades: number,
@@ -259,11 +277,12 @@ function pickRule(
     for (const keep of [0.9, 0.8, 0.7, 0.5, 0.3]) if (asc.length) caps.push(asc[Math.min(asc.length - 1, Math.floor(keep * asc.length))]);
   }
   const found: Rule[] = [];
-  for (const th of ths)
-    for (const cap of caps) {
-      const sim = simulate(d, rows, outs, (k) => signal[k] >= th && (cap == null || risk![k] <= cap));
-      if (sim.trades >= minTrades) found.push({ th, risk: cap, sim });
-    }
+  for (const hold of HOLDS)
+    for (const th of ths)
+      for (const cap of caps) {
+        const sim = simulate(d, rows, outsByHold[hold], (k) => signal[k] >= th && (cap == null || risk![k] <= cap));
+        if (sim.trades >= minTrades) found.push({ th, risk: cap, hold, sim });
+      }
   return chooseBest(found, (r) => r.sim);
 }
 
@@ -431,6 +450,8 @@ async function train() {
       }
       return { rows: Int32Array.from(r), outs: o };
     };
+    /** The rows' outcomes for every hold time. */
+    const byHold = (rows: Int32Array, target: Target) => HOLDS.map((h) => Array.from(rows, (i) => outcomeFor(d, i, target, h)));
     for (const target of ML.targets) {
       const tr = withOutcomes(trainAll, target);
       const tu = withOutcomes(tuneAll, target);
@@ -444,7 +465,7 @@ async function train() {
       }
       const fit = await fitGbdt({ X: d.X, F, y, train: tr.rows, valid: tu.rows, params, pacer });
       const risk = crashUsable ? Array.from(tu.rows, (i) => crashProb[i]) : null;
-      const rule = pickRule(d, tu.rows, tu.outs, fit.validProb!, risk, tuneMinTrades);
+      const rule = pickRule(d, tu.rows, byHold(tu.rows, target), fit.validProb!, risk, tuneMinTrades);
       if (rule) cands.push({ target, gbdt: fit.model, rule });
       else {
         const pr = Array.from(fit.validProb!);
@@ -466,32 +487,33 @@ async function train() {
     const testRows = Array.from(test0.rows);
     const testOuts = test0.outs;
     const testIdx = test0.rows;
+    const testByHold = byHold(testIdx, best.target);
     const testProb = testRows.map((i) => predict(best.gbdt, rowX(i)));
     const testRisk = testRows.map((i) => crashProb[i]);
     const testAuc = auc(testProb, testOuts.map((o) => o.y));
     const rule = best.rule;
-    const test = simulate(d, testIdx, testOuts, (k) => testProb[k] >= rule.th && (rule.risk == null || testRisk[k] <= rule.risk));
+    const test = simulate(d, testIdx, testByHold[rule.hold], (k) => testProb[k] >= rule.th && (rule.risk == null || testRisk[k] <= rule.risk));
     const baseRate = testOuts.length ? testOuts.reduce((a, o) => a + o.y, 0) / testOuts.length : 0;
 
     // ---- the same periods traded on the MemeRadar score, alone and with the crash filter
     const tune0 = withOutcomes(tuneAll, best.target);
     const tuneRows = Array.from(tune0.rows);
-    const tuneOuts = tune0.outs;
     const scoreBars = [55, 60, 65, 70, 75, 80, 85];
     const tuneScore = tuneRows.map((i) => d.score[i]);
     const testScore = testRows.map((i) => d.score[i]);
-    const plain = pickRule(d, tune0.rows, tuneOuts, tuneScore, null, tuneMinTrades, scoreBars);
+    const tuneByHold = byHold(tune0.rows, best.target);
+    const plain = pickRule(d, tune0.rows, tuneByHold, tuneScore, null, tuneMinTrades, scoreBars);
     const baseline: MlModelInfo['baseline'] = plain
-      ? { ...cleanSim(simulate(d, testIdx, testOuts, (k) => testScore[k] >= plain.th)), threshold: plain.th }
+      ? { ...cleanSim(simulate(d, testIdx, testByHold[plain.hold], (k) => testScore[k] >= plain.th)), threshold: plain.th }
       : null;
     const filtered = crashUsable
-      ? pickRule(d, tune0.rows, tuneOuts, tuneScore, tuneRows.map((i) => crashProb[i]), tuneMinTrades, scoreBars)
+      ? pickRule(d, tune0.rows, tuneByHold, tuneScore, tuneRows.map((i) => crashProb[i]), tuneMinTrades, scoreBars)
       : null;
     let scoreRiskMax = filtered?.risk ?? null;
     const scoreFiltered: MlModelInfo['scoreFiltered'] =
       filtered && filtered.risk != null
         ? {
-            ...cleanSim(simulate(d, testIdx, testOuts, (k) => testScore[k] >= filtered.th && testRisk[k] <= filtered.risk!)),
+            ...cleanSim(simulate(d, testIdx, testByHold[filtered.hold], (k) => testScore[k] >= filtered.th && testRisk[k] <= filtered.risk!)),
             threshold: filtered.th,
           }
         : null;
@@ -529,10 +551,10 @@ async function train() {
     const canTrade = (i: number) =>
       d.liq[i] >= ML.tradeMinLiquidity && !d.danger[i] && d.tradeable[i] === 1 && !(d.out[i * OUT_W + OUT_AT.e1] > ML.maxChasePct);
     const calibAll = [...tuneRows, ...testRows];
-    const calibAllOuts = [...tuneOuts, ...testOuts];
-    const calibKeep = calibAll.map((i, k) => (canTrade(i) ? k : -1)).filter((k) => k >= 0);
+    const calibAllOuts = [...tuneByHold[rule.hold], ...testByHold[rule.hold]];
+    const calibKeep = calibAll.map((i, k) => (canTrade(i) && calibAllOuts[k] ? k : -1)).filter((k) => k >= 0);
     const calibRows = calibKeep.map((k) => calibAll[k]);
-    const calibOuts = calibKeep.map((k) => calibAllOuts[k]);
+    const calibOuts = calibKeep.map((k) => calibAllOuts[k]!);
     const calibProb = calibRows.map((i) => predict(best.gbdt, rowX(i)));
     // Rate coins against similar coins on the same side of the crash cap, so a pick's numbers match the test.
     const isSafe = (i: number) => rule.risk == null || crashProb[i] <= rule.risk;
@@ -545,9 +567,24 @@ async function train() {
     const mints = new Set<number>();
     for (let i = 0; i < n; i++) mints.add(d.mint[i]);
 
+    // Every exit it tried, each with the rule the tuning data chose for it, and how that rule then did
+    // in the test. Only for seeing what works: the choice above never looked at these test results.
+    const options: NonNullable<MlModelInfo['options']> = [];
+    for (const c of cands) {
+      const rows = c === best ? test0.rows : withOutcomes(testAll, c.target).rows;
+      const prob: number[] = [];
+      for (const i of rows) {
+        prob.push(predict(c.gbdt, rowX(i)));
+        await pacer.maybeYield();
+      }
+      const outs = Array.from(rows, (i) => outcomeFor(d, i, c.target, c.rule.hold));
+      const s = simulate(d, rows, outs, (k) => prob[k] >= c.rule.th && (c.rule.risk == null || crashProb[rows[k]] <= c.rule.risk));
+      options.push({ tp: c.target.tp, sl: c.target.sl, holdMin: holdMinutes(c.rule.hold), tune: cleanSim(c.rule.sim), test: cleanSim(s), chosen: c === best });
+    }
+
     const info: MlModelInfo = {
       version: Date.now(),
-      target: { tp: best.target.tp, sl: best.target.sl, holdMin: Math.round(ML.horizonMs / 60_000) },
+      target: { tp: best.target.tp, sl: best.target.sl, holdMin: holdMinutes(rule.hold) },
       trainRows: trainAll.length,
       tuneRows: tuneAll.length,
       testRows: testAll.length,
@@ -565,6 +602,7 @@ async function train() {
       proven: problems.length === 0,
       problems,
       topFeatures,
+      options,
     };
     current = {
       v: MODEL_V,
@@ -575,6 +613,7 @@ async function train() {
       crash: crashUsable ? crashModel : null,
       info,
       threshold: rule.th,
+      hold: rule.hold,
       riskMax: rule.risk,
       scoreRiskMax,
       calib: {
@@ -695,7 +734,7 @@ setSnapshotJudge((obs: Obs, freshAt: number) => {
     // The rule the test traded on: the bar, the crash cap, enough liquidity, no danger flags, a coin the bot trades.
     aiPick = p >= c.threshold && r.safeEnough && (obs.liq ?? 0) >= ML.tradeMinLiquidity && !hasDanger(obs) && isTradeable(obs);
     recorded = {
-      pick: aiPick ? ML.targets.findIndex((t) => t.tp === c.info.target.tp && t.sl === c.info.target.sl) : -1,
+      pick: aiPick ? encodePick(ML.targets.findIndex((t) => t.tp === c.info.target.tp && t.sl === c.info.target.sl), c.hold ?? FULL) : -1,
       trusted: trusted(c.info),
     };
   }
@@ -771,8 +810,8 @@ function computeLive() {
     for (let i = 0; i < d.n; i++) if (d.out[i * OUT_W + OUT_AT.pick] >= 0) rows.push(i);
     rows.sort((a, b) => d.t[a] - d.t[b]);
     const outs = rows.map((i) => {
-      const t = ML.targets[d.out[i * OUT_W + OUT_AT.pick]];
-      return t ? outcomeFor(d, i, t) : null;
+      const p = decodePick(d.out[i * OUT_W + OUT_AT.pick]);
+      return p.target && p.hold >= 0 ? outcomeFor(d, i, p.target, p.hold) : null;
     });
     const all: { t: number; ret: number }[] = [];
     const sim = simulate(d, Int32Array.from(rows), outs, () => true, all);
@@ -957,7 +996,9 @@ export async function startModel() {
   try {
     const saved = await kvGet<SavedModel>(ML.modelKey);
     if (
-      (saved?.v === 4 || saved?.v === 5 || saved?.v === 6 || saved?.v === 7 || saved?.v === MODEL_V) &&
+      saved?.v != null &&
+      saved.v >= 4 &&
+      saved.v <= MODEL_V &&
       saved.cost === ML.costPerSide &&
       saved.schema === ML.schema &&
       JSON.stringify(saved.featureLabels) === JSON.stringify(FEATURE_LABELS) &&
