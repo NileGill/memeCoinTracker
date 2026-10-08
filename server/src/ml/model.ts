@@ -45,12 +45,12 @@ const decodePick = (v: number) => ({ target: ML.targets[v % 100], hold: FULL - M
  * Saved-model format. Older versions still load, then retrain at once: 4 was tested before the bot
  * traded exactly like the test, 5 before pulled liquidity counted as a total loss, 6 on coins whose
  * liquidity could be pulled, 7 on brand-new bot-traded coins (none of which the bot buys any more),
- * 8 with full-hour holds and fewer exits only.
+ * 8 with full-hour holds and fewer exits only, 9 choosing options by their plain tuning average.
  */
-const MODEL_V = 9;
+const MODEL_V = 10;
 
 interface SavedModel {
-  v: 4 | 5 | 6 | 7 | 8 | 9;
+  v: 4 | 5 | 6 | 7 | 8 | 9 | 10;
   schema: number;
   /** Cost per side the test charged; a model tested at a different cost is retrained. */
   cost: number;
@@ -165,6 +165,8 @@ function crashFor(d: Dataset, i: number): number | null {
 
 interface Sim extends StrategyResult {
   sum: number;
+  /** Cautious estimate of the average: the average minus ML.selectZ standard errors (-Infinity under 2 trades). */
+  lcb: number;
 }
 
 /**
@@ -184,6 +186,7 @@ function simulate(
   let trades = 0;
   let wins = 0;
   let sum = 0;
+  let sumSq = 0;
   let gw = 0;
   let gl = 0;
   for (let k = 0; k < rows.length; k++) {
@@ -197,19 +200,23 @@ function simulate(
     busyUntil.set(m, d.t[i] + oc.exitSec * 1000 + ML.cooldownMs);
     trades++;
     sum += oc.ret;
+    sumSq += oc.ret * oc.ret;
     log?.push({ t: d.t[i], ret: oc.ret });
     if (oc.ret > 0) {
       wins++;
       gw += oc.ret;
     } else gl -= oc.ret;
   }
+  const mean = trades ? sum / trades : 0;
+  const variance = trades > 1 ? Math.max(0, (sumSq - trades * mean * mean) / (trades - 1)) : NaN;
   return {
     trades,
     winRate: trades ? wins / trades : 0,
-    avgReturn: trades ? sum / trades : 0,
+    avgReturn: mean,
     totalReturn: sum,
     profitFactor: gl > 0 ? gw / gl : null,
     sum,
+    lcb: trades > 1 ? mean - ML.selectZ * Math.sqrt(variance / trades) : -Infinity,
   };
 }
 
@@ -223,15 +230,16 @@ const cleanSim = (s: Sim): StrategyResult => ({
 });
 
 /**
- * The most profitable option; among options within a whisker of it, the one that wins most
+ * The option with the best cautious estimate of its average (average minus a standard error, so a
+ * handful of lucky trades can't win); among options within a whisker of it, the one that wins most
  * often (then the one with more trades).
  */
 function chooseBest<T>(items: T[], sim: (t: T) => Sim): T | null {
   // A result that isn't a number can never be best (one used to make every option lose silently).
-  const usable = items.filter((x) => Number.isFinite(sim(x).avgReturn));
+  const usable = items.filter((x) => Number.isFinite(sim(x).lcb));
   if (!usable.length) return null;
-  const top = Math.max(...usable.map((x) => sim(x).avgReturn));
-  const close = usable.filter((x) => sim(x).avgReturn >= top - ML.preferWinRateWithin);
+  const top = Math.max(...usable.map((x) => sim(x).lcb));
+  const close = usable.filter((x) => sim(x).lcb >= top - ML.preferWinRateWithin);
   close.sort((a, b) => sim(b).winRate - sim(a).winRate || sim(b).trades - sim(a).trades);
   return close[0];
 }

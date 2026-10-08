@@ -75,6 +75,12 @@ export const ML = {
    * that wins more often.
    */
   preferWinRateWithin: 1,
+  /**
+   * Options are compared on their average minus this many standard errors (a cautious estimate), not
+   * the plain average: with 15-70 tuning trades, some option always looks good by luck. On 2026-10-08
+   * every exit's tuning average was positive and nearly every one was negative in the test.
+   */
+  selectZ: 1,
 
   /**
    * Assumed cost per buy or sell: 1% pool + router fee, plus ~0.5% slippage for a trade of 0.25% of
