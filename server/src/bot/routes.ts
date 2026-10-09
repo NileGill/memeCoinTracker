@@ -73,11 +73,12 @@ export function botRouter() {
       async (req) => {
         requireReady();
         const start = req.body?.startBalance;
-        if (typeof start !== 'number' || !Number.isFinite(start) || start < 0.1 || start > 10_000)
-          throw new HttpError(400, 'Starting balance must be between 0.1 and 10,000 SOL.');
+        // Balances are kept to 6 decimals: anything that rounds to 0 is too small to hold.
+        if (typeof start !== 'number' || !Number.isFinite(start) || !(Math.round(start * 1e6) > 0) || start > 10_000)
+          throw new HttpError(400, 'Starting balance must be more than 0 and at most 10,000 SOL.');
         const settings = cleanSettings(req.body?.settings, getAccount(req.user!.id)?.settings ?? DEFAULT_PAPER_SETTINGS);
         if (paperFull(req.user!.id)) throw new HttpError(503, 'The paper trading server is full right now. Try again later.');
-        const a = createAccount(req.user!.id, Math.round(start * 1e4) / 1e4, settings);
+        const a = createAccount(req.user!.id, Math.round(start * 1e6) / 1e6, settings);
         await savePaper(req.user!.id, { force: true });
         return { account: accountView(a) };
       },

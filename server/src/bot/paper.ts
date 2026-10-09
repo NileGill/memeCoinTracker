@@ -50,6 +50,11 @@ import { feedsOk, PULLED_AFTER_MS, PULLED_SHARE } from '../ml/recorder';
 const TICK_MS = 5_000;
 const FEE_SOL = 0.0005; // network + priority fee per swap
 const FEE = 0.01; // pool + router fee per side
+/**
+ * Smallest buy the bot places. Each swap still pays the network fee (FEE_SOL), so on tiny balances
+ * fees take a big share of every trade, as they would for real.
+ */
+export const MIN_TRADE_SOL = 0.001;
 const MAX_TRADES = 500;
 const TOP_N = 25;
 const CURVE_EVERY_MS = ML.fast ? 30_000 : 15 * 60_000;
@@ -205,7 +210,7 @@ function tradeSize(a: Account, liquidity: number, sol: number, now: number): num
   const equity = equityOf(a, sol, now);
   const poolCapSol = (liquidity * a.settings.maxPoolPct) / 100 / sol;
   const size = Math.min((equity * a.settings.sizePct) / 100, a.settings.maxTradeSol, poolCapSol, a.cash - FEE_SOL);
-  return size >= 0.01 ? size : 0;
+  return size >= MIN_TRADE_SOL ? size : 0;
 }
 
 /**
@@ -520,7 +525,7 @@ function tick() {
     const list = strategy === 'model' ? lists.model : lists.score.filter((c) => c.signal.score! >= a.settings.scoreMin);
     for (const c of list) noteWanted(a.userId, c.live.view.mint, now);
     for (const c of list) {
-      if (a.positions.length >= a.settings.maxOpen || a.cash - FEE_SOL < 0.01) break;
+      if (a.positions.length >= a.settings.maxOpen || a.cash - FEE_SOL < MIN_TRADE_SOL) break;
       const v = c.live.view;
       if (a.positions.some((p) => p.mint === v.mint) || (a.cooldown[v.mint] ?? 0) > now) continue;
       if (c.live.liquidity! < a.settings.minLiquidity) {
@@ -612,7 +617,7 @@ function skipNote(a: Account, strategy: PaperStrategy): string {
   const min = a.settings.minLiquidity;
   const minText = min >= 1e6 ? `$${Math.round(min / 1e5) / 10}M` : `$${Math.round(min / 1000)}K`;
   if (thin) parts.push(`${thin} had less liquidity than your ${minText} minimum`);
-  if (small) parts.push(`${small} would have been a trade under 0.01 SOL (balance too low)`);
+  if (small) parts.push(`${small} would have been a trade under ${MIN_TRADE_SOL} SOL (balance too low)`);
   if (pullable) parts.push(`${pullable} had pool liquidity ${pullable === 1 ? 'its creator' : 'their creators'} can pull at any time (RugCheck)`);
   if (unchecked) parts.push(`${unchecked} couldn't be checked with RugCheck`);
   const n = thin + small + pullable + unchecked;

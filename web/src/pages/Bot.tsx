@@ -460,7 +460,7 @@ function StartForm({ restart, onDone }: { restart?: PaperAccountView; onDone?: (
   const [err, setErr] = useState<string | null>(null);
   const start = async () => {
     const b = Number(balance);
-    if (!(b >= 0.1 && b <= 10_000)) return setErr('Starting balance must be between 0.1 and 10,000 SOL.');
+    if (!(b > 0 && b <= 10_000)) return setErr('Starting balance must be more than 0 and at most 10,000 SOL.');
     if (restart && !confirm('Start over? This wipes the current paper bot, its open trades and its history.')) return;
     setBusy(true);
     setErr(null);
@@ -485,7 +485,7 @@ function StartForm({ restart, onDone }: { restart?: PaperAccountView; onDone?: (
         <label className="field" style={{ maxWidth: 260 }}>
           Fake SOL to start with
           <span className="row" style={{ gap: 6 }}>
-            <input className="input num" type="number" min={0.1} max={10000} step={0.1} value={balance} onChange={(e) => setBalance(e.target.value)} />
+            <input className="input num" type="number" min={0} max={10000} step="any" value={balance} onChange={(e) => setBalance(e.target.value)} />
             <span className="muted">SOL</span>
           </span>
         </label>
