@@ -46,7 +46,7 @@ export function fmtNum(v: number | null | undefined, digits = 2): string {
 export function fmtSol(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return '—';
   const a = Math.abs(v);
-  const d = a >= 100 ? 1 : a >= 1 ? 2 : a >= 0.01 ? 3 : 4;
+  const d = a >= 100 ? 1 : a >= 1 ? 2 : a >= 0.01 ? 3 : a >= 0.0001 || a === 0 ? 4 : 6;
   return `${v.toFixed(d)} SOL`;
 }
 

@@ -502,6 +502,19 @@ export interface UltraOrder {
   swapType?: string;
   routePlan?: { percent: number; swapInfo: { label?: string } }[];
   transaction: string | null;
+  /**
+   * What the taker pays in SOL on top of the trade, in lamports (with who pays, null when Jupiter
+   * covers it): the network signature and priority fees, and rent for token accounts the trade has to
+   * open (a refundable deposit for a coin the wallet doesn't hold yet).
+   */
+  signatureFeeLamports?: number;
+  signatureFeePayer?: string | null;
+  prioritizationFeeLamports?: number;
+  prioritizationFeePayer?: string | null;
+  rentFeeLamports?: number;
+  rentFeePayer?: string | null;
+  gasless?: boolean;
+  /** 1 = the taker doesn't have enough SOL (or tokens) for the trade and its fees. */
   errorCode?: number;
   errorMessage?: string;
   error?: string;

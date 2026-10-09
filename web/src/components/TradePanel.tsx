@@ -6,8 +6,27 @@ import { connectWallet, getPhantom, PHANTOM_DOWNLOAD, phantomAppLink, refreshHol
 import { recordSwap, useStore } from '../store';
 import { Icon } from './Icon';
 
-const FEE_RESERVE_SOL = 0.01;
 const LAMPORTS = 9;
+/**
+ * Used only when Jupiter doesn't break the costs down: a first buy of a coin opens a token account
+ * for it in the wallet, a refundable deposit of ~0.002-0.003 SOL (0.00298 for a pump.fun coin,
+ * measured 2026-10-09), and every swap pays a small network fee.
+ */
+const NEW_ACCOUNT_SOL = 0.003;
+const NETWORK_FEE_SOL = 0.0001;
+
+/** SOL the wallet pays on top of the trade itself, from Jupiter's order (fees Jupiter covers don't count). */
+function extraCosts(o: UltraOrder, taker: string | null) {
+  const paid = (lamports: number | undefined, payer: string | null | undefined) =>
+    lamports && (payer == null ? !o.gasless : payer === taker) ? lamports / 1e9 : 0;
+  return {
+    fees: paid(o.signatureFeeLamports, o.signatureFeePayer) + paid(o.prioritizationFeeLamports, o.prioritizationFeePayer),
+    deposit: paid(o.rentFeeLamports, o.rentFeePayer),
+  };
+}
+
+/** Jupiter says the wallet can't cover this trade plus its fees. */
+const notEnough = (o: UltraOrder) => o.errorCode === 1 || /insufficient/i.test(o.errorMessage ?? o.error ?? '');
 
 type Phase = 'idle' | 'signing' | 'sending' | 'done' | 'error';
 
@@ -61,8 +80,8 @@ export function TradePanel({ token, initialSide }: { token: TokenView; initialSi
       const sol = fromBaseUnits(amountRaw, LAMPORTS);
       if (sol > settings.maxTradeSol)
         return `That's above your max trade size of ${settings.maxTradeSol} SOL. You can change it in Settings.`;
-      if (solBalance !== null && sol + FEE_RESERVE_SOL > solBalance)
-        return `Not enough SOL. You have ${fmtSol(solBalance)} and about ${FEE_RESERVE_SOL} SOL is kept for fees.`;
+      // The exact fees and deposit come from Jupiter's quote below; this only catches the obvious.
+      if (solBalance !== null && sol > solBalance) return `Not enough SOL. You have ${fmtSol(solBalance)}.`;
     } else {
       if (!wallet.address) return null;
       if (!holding) return `You don't hold any ${token.symbol}.`;
@@ -84,7 +103,7 @@ export function TradePanel({ token, initialSide }: { token: TokenView; initialSi
       const o = await api.order({ inputMint, outputMint, amount: amountRaw.toString(), taker: wallet.address ?? undefined });
       if (seq !== quoteSeq.current) return;
       setQuote(o);
-      setQuoteErr(o.errorMessage && !o.outAmount ? o.errorMessage : null);
+      setQuoteErr(o.errorMessage && (!o.outAmount || notEnough(o)) ? o.errorMessage : null);
     } catch (e) {
       if (seq !== quoteSeq.current) return;
       setQuote(null);
@@ -122,6 +141,21 @@ export function TradePanel({ token, initialSide }: { token: TokenView; initialSi
   const outUi = quote && outDecimals !== null ? fromBaseUnits(quote.outAmount, outDecimals) : null;
   const busy = phase === 'signing' || phase === 'sending';
   const phantomMissing = !wallet.available && !getPhantom();
+  const extras = quote ? extraCosts(quote, wallet.address) : null;
+  const shortOfSol = quote !== null && notEnough(quote);
+
+  /** Why the wallet can't afford this, with the most it can buy, when Jupiter says it's short. */
+  function shortMessage(): string {
+    if (side === 'sell') return `Not enough SOL to pay the network fee for this sale (you have ${solBalance != null ? fmtSol(solBalance) : 'too little'}).`;
+    const deposit = holding ? 0 : extras && extras.deposit > 0 ? extras.deposit : NEW_ACCOUNT_SOL;
+    const fees = extras && extras.fees > 0 ? extras.fees : NETWORK_FEE_SOL;
+    const max = solBalance != null ? Math.floor((solBalance - deposit - fees) * 1e5) / 1e5 : null;
+    const why = holding
+      ? 'Each swap also pays a small network fee.'
+      : `Buying a coin you don't hold yet also opens an account for it in your wallet, a deposit of about ${deposit.toFixed(4)} SOL (you get it back if you close the account later), plus a small network fee.`;
+    const room = max == null ? '' : max > 0 ? ` The most you can buy right now is about ${max} SOL.` : ' Add a little more SOL to buy this coin.';
+    return `Not enough SOL for this buy${solBalance != null ? ` (you have ${fmtSol(solBalance)})` : ''}. ${why}${room}`;
+  }
 
   async function submit() {
     setMessage(null);
@@ -253,7 +287,7 @@ export function TradePanel({ token, initialSide }: { token: TokenView; initialSi
       {!validation && (quote || quoting || quoteErr) && (
         <div className="quote">
           {quoteErr ? (
-            <span className="down">{quoteErr}</span>
+            <span className="down">{shortOfSol ? shortMessage() : quoteErr}</span>
           ) : quote ? (
             <>
               <div className="qrow">
@@ -281,6 +315,26 @@ export function TradePanel({ token, initialSide }: { token: TokenView; initialSi
                   {quote.feeBps != null && <span className="dim"> · fee {(quote.feeBps / 100).toFixed(2)}%</span>}
                 </span>
               </div>
+              {extras && extras.fees > 0 && (
+                <div className="qrow">
+                  <span className="muted">Network fee</span>
+                  <span className="num">{fmtSol(extras.fees)}</span>
+                </div>
+              )}
+              {extras && extras.deposit > 0 && (
+                <div className="qrow">
+                  <span className="muted" title="Opening this coin's token account in your wallet. You get it back if you close the account later.">
+                    Account deposit (refundable)
+                  </span>
+                  <span className="num">{fmtSol(extras.deposit)}</span>
+                </div>
+              )}
+              {side === 'buy' && extras && extras.fees + extras.deposit > 0 && (
+                <div className="qrow">
+                  <span className="muted">Total from your wallet</span>
+                  <b className="num">{fmtSol(fromBaseUnits(quote.inAmount, LAMPORTS) + extras.fees + extras.deposit)}</b>
+                </div>
+              )}
               {quote.errorMessage && <div className="warn">{quote.errorMessage}</div>}
             </>
           ) : (
